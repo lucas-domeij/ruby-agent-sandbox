@@ -21,12 +21,14 @@ module AgentSandbox
     class E2B
       CONTROL_PLANE = "https://api.e2b.app".freeze
 
-      # Defaults for network behaviour. All overridable per-sandbox.
-      DEFAULT_OPEN_TIMEOUT = 10    # TCP connect + TLS handshake
-      DEFAULT_READ_TIMEOUT = 120   # per-call read (envd exec can be long)
-      DEFAULT_MAX_RETRIES = 3      # transient 5xx / connection resets
-      RETRY_BACKOFF_BASE = 0.5     # seconds, doubled each attempt
-      RETRIABLE_STATUSES = %w[502 503 504].freeze
+      DEFAULT_OPEN_TIMEOUT = 10
+      DEFAULT_READ_TIMEOUT = 120
+      # Extra attempts beyond the initial one. max_retries=3 => up to 4 total
+      # HTTP round trips on persistent failure.
+      DEFAULT_MAX_RETRIES = 3
+      RETRY_BACKOFF_BASE = 0.5
+      RETRIABLE_STATUSES = [502, 503, 504].freeze
+      IDEMPOTENT_METHODS = %w[GET HEAD DELETE].freeze
 
       def initialize(template: "base", api_key: ENV["E2B_API_KEY"], timeout: 3600,
                      metadata: {}, open_timeout: DEFAULT_OPEN_TIMEOUT,
@@ -67,14 +69,14 @@ module AgentSandbox
         apply_envd_headers(req)
         req["Content-Type"] = "application/octet-stream"
         req.body = content
-        envd_request(uri, req, what: "POST /files")
+        perform_request(uri, req, what: "envd POST /files")
       end
 
       def read_file(path)
         uri = envd_uri("/files", user: "user", path: path)
         req = Net::HTTP::Get.new(uri)
         apply_envd_headers(req)
-        envd_request(uri, req, what: "GET /files").body
+        perform_request(uri, req, what: "envd GET /files").body
       end
 
       # envd's process.Process/Start is a Connect-RPC server-streaming method.
@@ -91,12 +93,10 @@ module AgentSandbox
         payload = JSON.generate(process: { cmd: "sh", args: ["-c", command] })
         req.body = pack_frame(payload)
 
-        response = envd_request(uri, req, what: "exec")
+        response = perform_request(uri, req, what: "envd exec")
         consume_exec_stream(response.body)
       end
 
-      # Reads the Connect-RPC server-streaming body into an ExecResult. Public
-      # for tests — the network call is the only thing it doesn't cover.
       def consume_exec_stream(bytes)
         stdout = +""
         stderr = +""
@@ -168,68 +168,63 @@ module AgentSandbox
           req.body = JSON.generate(body)
         end
         response = perform_request(uri, req, what: "control #{method.upcase} #{path}")
-        classify_response!(response, what: "E2B #{method.upcase} #{path}")
         return nil unless expect_json
-        response.body.to_s.empty? ? {} : JSON.parse(response.body)
-      end
-
-      # Single envd call + retry + status-to-error mapping. Returns the raw
-      # response so callers can grab .body where relevant.
-      def envd_request(uri, req, what:)
-        response = perform_request(uri, req, what: what)
-        classify_response!(response, what: "envd #{what}")
-        response
-      end
-
-      # Shared HTTP execution: opens the socket, retries transient failures
-      # with exponential backoff, maps socket/timeouts to our error hierarchy.
-      def perform_request(uri, req, what:)
-        attempts = 0
-        begin
-          attempts += 1
-          response = http_for(uri).request(req)
-          if attempts <= @max_retries && RETRIABLE_STATUSES.include?(response.code)
-            sleep(backoff_for(attempts))
-            raise ServerError, "retry"
-          end
-          response
-        rescue ServerError
-          retry
-        rescue Net::OpenTimeout, Net::ReadTimeout => e
-          if attempts <= @max_retries
-            sleep(backoff_for(attempts))
-            retry
-          end
-          raise TimeoutError, "#{what} timed out after #{attempts} attempts: #{e.message}"
-        rescue Errno::ECONNREFUSED, Errno::ECONNRESET, Errno::EHOSTUNREACH,
-               Errno::ENETUNREACH, SocketError, OpenSSL::SSL::SSLError => e
-          if attempts <= @max_retries
-            sleep(backoff_for(attempts))
-            retry
-          end
-          raise ConnectError, "#{what} connect failed after #{attempts} attempts: #{e.class}: #{e.message}"
-        end
-      end
-
-      # Maps HTTP status to our error hierarchy. 401/403 -> AuthError,
-      # 404 -> SandboxNotFound, 5xx -> ServerError, other 4xx -> HttpError.
-      def classify_response!(response, what:)
-        return if response.code.start_with?("2")
         body = response.body.to_s
-        case response.code
-        when "401", "403"
-          raise AuthError, "#{what}: #{response.code} #{body[0, 300]}"
-        when "404"
-          raise SandboxNotFound, "#{what}: #{response.code} #{body[0, 300]}"
-        when /\A5\d\d\z/
-          raise ServerError, "#{what}: #{response.code} #{body[0, 300]}"
-        else
-          raise HttpError.new(status: response.code.to_i, body: body, message: "#{what}: HTTP #{response.code}: #{body[0, 300]}")
+        body.empty? ? {} : JSON.parse(body)
+      end
+
+      # Retries only idempotent requests, so a 502 from a POST that may have
+      # already taken effect (e.g. sandbox create) never fires twice.
+      def perform_request(uri, req, what:)
+        retries_left = IDEMPOTENT_METHODS.include?(req.method.upcase) ? @max_retries : 0
+        attempt = 0
+
+        loop do
+          attempt += 1
+          begin
+            response = http_for(uri).request(req)
+            code = response.code.to_i
+            if retries_left > 0 && RETRIABLE_STATUSES.include?(code)
+              retries_left -= 1
+              sleep(backoff_for(attempt))
+              next
+            end
+            raise_for_status!(response, code, what: what)
+            return response
+          rescue Net::OpenTimeout, Net::ReadTimeout => e
+            raise TimeoutError, "#{what} timed out after #{attempt} attempts: #{e.message}" if retries_left <= 0
+            retries_left -= 1
+            sleep(backoff_for(attempt))
+          rescue Errno::ECONNREFUSED, Errno::ECONNRESET, Errno::EHOSTUNREACH,
+                 Errno::ENETUNREACH, SocketError => e
+            raise ConnectError, "#{what} connect failed after #{attempt} attempts: #{e.class}: #{e.message}" if retries_left <= 0
+            retries_left -= 1
+            sleep(backoff_for(attempt))
+          rescue OpenSSL::SSL::SSLError => e
+            # Cert verification failures are terminal — no point retrying.
+            raise ConnectError, "#{what} SSL failure: #{e.message}" if e.message =~ /certificate|hostname|verify/i
+            raise ConnectError, "#{what} SSL failure after #{attempt} attempts: #{e.message}" if retries_left <= 0
+            retries_left -= 1
+            sleep(backoff_for(attempt))
+          end
         end
       end
 
+      def raise_for_status!(response, code, what:)
+        return if code.between?(200, 299)
+        body = response.body.to_s[0, 300]
+        case code
+        when 401, 403 then raise AuthError, "#{what}: #{code} #{body}"
+        when 404      then raise SandboxNotFound, "#{what}: #{code} #{body}"
+        when 500..599 then raise ServerError, "#{what}: #{code} #{body}"
+        else               raise HttpError.new(status: code, body: body, message: "#{what}: HTTP #{code}: #{body}")
+        end
+      end
+
+      # Exponential backoff with jitter to avoid thundering-herd retries from
+      # many sandboxes hitting the same transient failure.
       def backoff_for(attempt)
-        RETRY_BACKOFF_BASE * (2**(attempt - 1))
+        RETRY_BACKOFF_BASE * (2**(attempt - 1)) * (1 + rand * 0.25)
       end
 
       def envd_uri(path, **query)

@@ -1,17 +1,7 @@
-$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
-require "agent_sandbox"
+require_relative "test_helper"
 
-fails = []
+fails, assert = TestHelper.runner
 backend = AgentSandbox::Backends::Docker.allocate # skip initialize, we only test parsing
-
-assert = ->(label, cond, detail = nil) {
-  if cond
-    puts "  ok  #{label}"
-  else
-    puts "FAIL  #{label}  #{detail}"
-    fails << label
-  end
-}
 
 # --- single-line IPv4 ---
 m = backend.send(:pick_port_mapping, "127.0.0.1:49153\n")
@@ -53,10 +43,4 @@ assert.("port_url brackets ipv6", backend.port_url(8080) == "http://[::1]:49153"
 backend.instance_variable_set(:@port_map, { 8080 => { host: "127.0.0.1", port: 49153, bind: "127.0.0.1", family: :ipv4 } })
 assert.("port_url leaves ipv4 unbracketed", backend.port_url(8080) == "http://127.0.0.1:49153", backend.port_url(8080))
 
-if fails.empty?
-  puts "\ndocker port parser: all good"
-  exit 0
-else
-  puts "\nFAIL: #{fails.inspect}"
-  exit 1
-end
+TestHelper.done(fails, label: "docker port parser")

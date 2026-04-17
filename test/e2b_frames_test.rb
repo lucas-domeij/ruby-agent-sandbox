@@ -1,9 +1,8 @@
-$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
-require "agent_sandbox"
+require_relative "test_helper"
 require "base64"
 require "json"
 
-fails = []
+fails, assert = TestHelper.runner
 
 def pack(json, flag: 0)
   payload = JSON.generate(json)
@@ -14,15 +13,6 @@ end
 def b64(str) = Base64.strict_encode64(str)
 
 backend = AgentSandbox::Backends::E2B.allocate # skip initialize (no api key needed)
-
-assert = ->(label, cond, detail = nil) {
-  if cond
-    puts "  ok  #{label}"
-  else
-    puts "FAIL  #{label}  #{detail}"
-    fails << label
-  end
-}
 
 puts "[happy path]"
 body =
@@ -118,10 +108,4 @@ end
 assert.("Sandbox#spawn rejects unsupported backend", raised && !raised.empty?, raised.inspect)
 assert.("Sandbox#spawn did not provision before rejecting", started == false)
 
-if fails.empty?
-  puts "\nall good"
-  exit 0
-else
-  puts "\nFAILURES: #{fails.inspect}"
-  exit 1
-end
+TestHelper.done(fails, label: "e2b frames")
