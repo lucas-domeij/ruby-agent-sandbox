@@ -34,7 +34,7 @@ Docker backend needs the Docker daemon running. E2B needs an API key from
 require "agent_sandbox"
 
 sandbox = AgentSandbox.new(backend: :docker, image: "ruby:3.3-slim")
-sandbox.with do |sb|
+sandbox.open do |sb|
   sb.write_file("/workspace/hello.rb", 'puts "hej från containern"')
   result = sb.exec("ruby /workspace/hello.rb")
   puts result.stdout  # => "hej från containern\n"
@@ -45,7 +45,7 @@ Running a webserver inside the sandbox and calling it from the host:
 
 ```ruby
 sandbox = AgentSandbox.new(backend: :docker, ports: [8080])
-sandbox.with do |sb|
+sandbox.open do |sb|
   sb.spawn("ruby -run -e httpd /workspace -p 8080")
   sleep 1
   puts sb.port_url(8080)  # => "http://127.0.0.1:54321"
@@ -56,7 +56,7 @@ end
 
 ```ruby
 sandbox = AgentSandbox.new(backend: :e2b, api_key: ENV["E2B_API_KEY"])
-sandbox.with do |sb|
+sandbox.open do |sb|
   sb.write_file("/home/user/data.json", '{"x": 1}')
   result = sb.exec("cat /home/user/data.json | jq .x")
   puts result.stdout  # => "1\n"
@@ -97,7 +97,7 @@ sandbox.write_file(path, content)
 sandbox.read_file(path)     # => String
 sandbox.port_url(port)      # => URL to reach a port published by the sandbox
 sandbox.stop                # tear down
-sandbox.with { |sb| ... }   # auto-start + auto-stop
+sandbox.open { |sb| ... }   # auto-start + auto-stop (alias: #with)
 ```
 
 ## Hardening (Docker backend)

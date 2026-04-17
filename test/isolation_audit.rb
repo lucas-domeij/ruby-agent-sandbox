@@ -11,7 +11,7 @@ def check(label, result)
   puts
 end
 
-sandbox.with do |s|
+sandbox.open do |s|
   check "whoami",            s.exec("whoami && id")
   check "host filesystem",   s.exec("ls /Users 2>&1; ls /host 2>&1; ls / | head -20")
   check "docker socket",     s.exec("ls -la /var/run/docker.sock 2>&1")

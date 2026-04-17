@@ -10,7 +10,7 @@ MODEL = ENV.fetch("OPENAI_MODEL", "gpt-4o-mini")
 
 sandbox = AgentSandbox.new(backend: :docker, image: "ruby:3.3-slim")
 
-sandbox.with do |s|
+sandbox.open do |s|
   chat = RubyLLM.chat(model: MODEL)
   chat.with_tools(*AgentSandbox.ruby_llm_tools(s))
 

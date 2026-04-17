@@ -69,7 +69,14 @@ module AgentSandbox
         cmd += @ports.flat_map { |p| ["-p", "#{@port_bind}:0:#{p}"] }
         cmd += [@image, "sh", "-c", "sleep infinity"]
         run!(cmd)
-        resolve_port_map if @ports.any?
+        @started = true
+        begin
+          resolve_port_map if @ports.any?
+        rescue
+          # If port resolution fails, don't leave a dangling container.
+          stop
+          raise
+        end
       end
 
       def exec(command)
@@ -96,7 +103,11 @@ module AgentSandbox
       end
 
       def port_url(port)
-        binding = @port_map[port] or raise Error, "port #{port} was not declared at init (pass ports: [#{port}])"
+        raise Error, "sandbox not started — call start (or use `sandbox.open { ... }`) before port_url" unless @started
+        unless @ports.include?(port)
+          raise Error, "port #{port} was not declared at init (pass ports: [#{port}])"
+        end
+        binding = @port_map[port] or raise Error, "port #{port} not yet mapped by docker"
         host = binding[:family] == :ipv6 ? "[#{binding[:host]}]" : binding[:host]
         "http://#{host}:#{binding[:port]}"
       end

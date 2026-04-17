@@ -3,7 +3,7 @@ require "agent_sandbox"
 
 sandbox = AgentSandbox.new(backend: :docker, image: "ruby:3.3-slim")
 
-sandbox.with do |s|
+sandbox.open do |s|
   puts "-- whoami --"
   puts s.exec("whoami").stdout
 

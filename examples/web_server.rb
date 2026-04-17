@@ -4,7 +4,7 @@ require "net/http"
 
 sandbox = AgentSandbox.new(backend: :docker, image: "ruby:3.3-slim", ports: [8080])
 
-sandbox.with do |s|
+sandbox.open do |s|
   s.write_file("/workspace/server.rb", <<~RUBY)
     require "socket"
     server = TCPServer.new("0.0.0.0", 8080)

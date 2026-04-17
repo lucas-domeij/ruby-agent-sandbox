@@ -61,12 +61,13 @@ module AgentSandbox
       @started = false
     end
 
-    def with
+    def open
       start
       yield self
     ensure
       stop
     end
+    alias_method :with, :open
 
     private
 

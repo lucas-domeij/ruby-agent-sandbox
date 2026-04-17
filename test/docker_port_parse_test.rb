@@ -36,11 +36,32 @@ assert.("ipv6-only output still resolves", m && m[:family] == :ipv6 && m[:port] 
 assert.("empty output returns nil", backend.send(:pick_port_mapping, "") == nil)
 assert.("garbage returns nil", backend.send(:pick_port_mapping, "not a port line\n") == nil)
 
-# --- port_url brackets IPv6 ---
+# --- port_url lifecycle + formatting ---
+backend.instance_variable_set(:@ports, [8080])
 backend.instance_variable_set(:@port_map, { 8080 => { host: "::1", port: 49153, bind: "::", family: :ipv6 } })
+
+# Not started yet -> clear error
+raised = nil
+begin
+  backend.port_url(8080)
+rescue AgentSandbox::Error => e
+  raised = e.message
+end
+assert.("port_url before start raises lifecycle error", raised && raised.include?("not started"), raised.inspect)
+
+backend.instance_variable_set(:@started, true)
 assert.("port_url brackets ipv6", backend.port_url(8080) == "http://[::1]:49153", backend.port_url(8080))
 
 backend.instance_variable_set(:@port_map, { 8080 => { host: "127.0.0.1", port: 49153, bind: "127.0.0.1", family: :ipv4 } })
 assert.("port_url leaves ipv4 unbracketed", backend.port_url(8080) == "http://127.0.0.1:49153", backend.port_url(8080))
+
+# Port not declared
+raised = nil
+begin
+  backend.port_url(9999)
+rescue AgentSandbox::Error => e
+  raised = e.message
+end
+assert.("undeclared port raises declared-at-init error", raised && raised.include?("was not declared"), raised.inspect)
 
 TestHelper.done(fails, label: "docker port parser")
