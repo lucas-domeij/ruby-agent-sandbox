@@ -72,9 +72,15 @@ module AgentSandbox
         @started = true
         begin
           resolve_port_map if @ports.any?
-        rescue
-          # If port resolution fails, don't leave a dangling container.
-          stop
+        rescue => e
+          # Roll back the container so a partial failure doesn't leak.
+          # If the rollback itself fails, surface both — a leaked container
+          # is something the caller needs to know about.
+          begin
+            stop
+          rescue => cleanup
+            raise Error, "#{e.class}: #{e.message} (and cleanup failed: #{cleanup.message})"
+          end
           raise
         end
       end
@@ -113,7 +119,12 @@ module AgentSandbox
       end
 
       def stop
-        system("docker", "rm", "-f", @name, out: File::NULL, err: File::NULL)
+        # Always clear lifecycle state so stale mappings can't outlive the
+        # container (port_url must raise after stop, even if rm fails).
+        @started = false
+        @port_map = {}
+        ok = system("docker", "rm", "-f", @name, out: File::NULL, err: File::NULL)
+        raise Error, "docker rm -f #{@name} failed" unless ok
       end
 
       private

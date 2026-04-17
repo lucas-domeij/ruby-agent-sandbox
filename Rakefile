@@ -4,6 +4,7 @@ require "rake/testtask"
 # safe to run in CI and on a fresh checkout.
 UNIT_TESTS = FileList[
   "test/docker_port_parse_test.rb",
+  "test/docker_lifecycle_test.rb",
   "test/e2b_frames_test.rb",
   "test/e2b_error_mapping_test.rb"
 ]
