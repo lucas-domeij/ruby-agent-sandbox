@@ -7,7 +7,9 @@ port, without letting it anywhere near your actual machine. Two swappable
 backends with identical APIs: **Docker** (local, free, hardened by default)
 and **E2B** (cloud Firecracker microVMs).
 
-Think `@cloudflare/sandbox` for Ruby.
+Think [`@cloudflare/sandbox`](https://www.npmjs.com/package/@cloudflare/sandbox)
+or [`@vercel/sandbox`](https://www.npmjs.com/package/@vercel/sandbox) — but
+for Ruby.
 
 ## Why
 
@@ -137,6 +139,16 @@ sandbox — it works. That said:
 - E2B `spawn` needs tagged Connect-RPC before it'll work
 - No CI, no Rubygems release yet
 - API may still shift
+
+## Prior art
+
+- [`@cloudflare/sandbox`](https://www.npmjs.com/package/@cloudflare/sandbox)
+  — Cloudflare's Workers-hosted sandbox SDK. The direct inspiration for this
+  gem's API shape.
+- [`@vercel/sandbox`](https://www.npmjs.com/package/@vercel/sandbox) —
+  Vercel's ephemeral compute for running untrusted bash / code from agents.
+- [E2B](https://e2b.dev) — Firecracker microVMs as a service. Powers the
+  `:e2b` backend here.
 
 ## License
 
