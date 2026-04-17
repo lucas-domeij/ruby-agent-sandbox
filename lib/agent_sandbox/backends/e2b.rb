@@ -1,4 +1,5 @@
 require "net/http"
+require "openssl"
 require "uri"
 require "json"
 require "base64"
@@ -20,12 +21,24 @@ module AgentSandbox
     class E2B
       CONTROL_PLANE = "https://api.e2b.app".freeze
 
-      def initialize(template: "base", api_key: ENV["E2B_API_KEY"], timeout: 3600, metadata: {})
-        raise Error, "E2B_API_KEY not set" if api_key.nil? || api_key.empty?
+      # Defaults for network behaviour. All overridable per-sandbox.
+      DEFAULT_OPEN_TIMEOUT = 10    # TCP connect + TLS handshake
+      DEFAULT_READ_TIMEOUT = 120   # per-call read (envd exec can be long)
+      DEFAULT_MAX_RETRIES = 3      # transient 5xx / connection resets
+      RETRY_BACKOFF_BASE = 0.5     # seconds, doubled each attempt
+      RETRIABLE_STATUSES = %w[502 503 504].freeze
+
+      def initialize(template: "base", api_key: ENV["E2B_API_KEY"], timeout: 3600,
+                     metadata: {}, open_timeout: DEFAULT_OPEN_TIMEOUT,
+                     read_timeout: DEFAULT_READ_TIMEOUT, max_retries: DEFAULT_MAX_RETRIES)
+        raise AuthError, "E2B_API_KEY not set" if api_key.nil? || api_key.empty?
         @api_key = api_key
         @template = template
         @timeout = timeout
         @metadata = metadata
+        @open_timeout = open_timeout
+        @read_timeout = read_timeout
+        @max_retries = max_retries
         @sandbox_id = nil
         @envd_domain = nil
         @access_token = nil
@@ -54,17 +67,14 @@ module AgentSandbox
         apply_envd_headers(req)
         req["Content-Type"] = "application/octet-stream"
         req.body = content
-        response = http_for(uri).request(req)
-        raise Error, "envd /files POST failed: #{response.code} #{response.body}" unless response.code.start_with?("2")
+        envd_request(uri, req, what: "POST /files")
       end
 
       def read_file(path)
         uri = envd_uri("/files", user: "user", path: path)
         req = Net::HTTP::Get.new(uri)
         apply_envd_headers(req)
-        response = http_for(uri).request(req)
-        raise Error, "envd /files GET failed: #{response.code} #{response.body}" unless response.code.start_with?("2")
-        response.body
+        envd_request(uri, req, what: "GET /files").body
       end
 
       # envd's process.Process/Start is a Connect-RPC server-streaming method.
@@ -81,9 +91,7 @@ module AgentSandbox
         payload = JSON.generate(process: { cmd: "sh", args: ["-c", command] })
         req.body = pack_frame(payload)
 
-        response = http_for(uri).request(req)
-        raise Error, "envd exec #{response.code}: #{response.body&.force_encoding('BINARY')}" unless response.code.start_with?("2")
-
+        response = envd_request(uri, req, what: "exec")
         consume_exec_stream(response.body)
       end
 
@@ -159,12 +167,69 @@ module AgentSandbox
           req["Content-Type"] = "application/json"
           req.body = JSON.generate(body)
         end
-        response = http_for(uri).request(req)
-        unless response.code.start_with?("2")
-          raise Error, "E2B #{method.upcase} #{path} -> #{response.code}: #{response.body}"
-        end
+        response = perform_request(uri, req, what: "control #{method.upcase} #{path}")
+        classify_response!(response, what: "E2B #{method.upcase} #{path}")
         return nil unless expect_json
-        response.body.empty? ? {} : JSON.parse(response.body)
+        response.body.to_s.empty? ? {} : JSON.parse(response.body)
+      end
+
+      # Single envd call + retry + status-to-error mapping. Returns the raw
+      # response so callers can grab .body where relevant.
+      def envd_request(uri, req, what:)
+        response = perform_request(uri, req, what: what)
+        classify_response!(response, what: "envd #{what}")
+        response
+      end
+
+      # Shared HTTP execution: opens the socket, retries transient failures
+      # with exponential backoff, maps socket/timeouts to our error hierarchy.
+      def perform_request(uri, req, what:)
+        attempts = 0
+        begin
+          attempts += 1
+          response = http_for(uri).request(req)
+          if attempts <= @max_retries && RETRIABLE_STATUSES.include?(response.code)
+            sleep(backoff_for(attempts))
+            raise ServerError, "retry"
+          end
+          response
+        rescue ServerError
+          retry
+        rescue Net::OpenTimeout, Net::ReadTimeout => e
+          if attempts <= @max_retries
+            sleep(backoff_for(attempts))
+            retry
+          end
+          raise TimeoutError, "#{what} timed out after #{attempts} attempts: #{e.message}"
+        rescue Errno::ECONNREFUSED, Errno::ECONNRESET, Errno::EHOSTUNREACH,
+               Errno::ENETUNREACH, SocketError, OpenSSL::SSL::SSLError => e
+          if attempts <= @max_retries
+            sleep(backoff_for(attempts))
+            retry
+          end
+          raise ConnectError, "#{what} connect failed after #{attempts} attempts: #{e.class}: #{e.message}"
+        end
+      end
+
+      # Maps HTTP status to our error hierarchy. 401/403 -> AuthError,
+      # 404 -> SandboxNotFound, 5xx -> ServerError, other 4xx -> HttpError.
+      def classify_response!(response, what:)
+        return if response.code.start_with?("2")
+        body = response.body.to_s
+        case response.code
+        when "401", "403"
+          raise AuthError, "#{what}: #{response.code} #{body[0, 300]}"
+        when "404"
+          raise SandboxNotFound, "#{what}: #{response.code} #{body[0, 300]}"
+        when /\A5\d\d\z/
+          raise ServerError, "#{what}: #{response.code} #{body[0, 300]}"
+        else
+          raise HttpError.new(status: response.code.to_i, body: body, message: "#{what}: HTTP #{response.code}: #{body[0, 300]}")
+        end
+      end
+
+      def backoff_for(attempt)
+        RETRY_BACKOFF_BASE * (2**(attempt - 1))
       end
 
       def envd_uri(path, **query)
@@ -181,7 +246,8 @@ module AgentSandbox
       def http_for(uri)
         http = Net::HTTP.new(uri.host, uri.port)
         http.use_ssl = (uri.scheme == "https")
-        http.read_timeout = 120
+        http.open_timeout = @open_timeout
+        http.read_timeout = @read_timeout
         http
       end
 
