@@ -49,6 +49,12 @@ module AgentSandbox
       def name = @sandbox_id
 
       def start
+        if @sandbox_id
+          # Refuse to provision a second sandbox while a previous one is
+          # still unresolved — otherwise a failed stop + restart orphans the
+          # first sandbox (and keeps billing it) while losing its handle.
+          raise Error, "previous sandbox #{@sandbox_id} still tracked; call stop again or abandon this backend instance"
+        end
         body = { templateID: @template, timeout: @timeout, metadata: @metadata, secure: true }
         res = control_request(:post, "/sandboxes", body: body)
         @sandbox_id = res.fetch("sandboxID")
@@ -59,6 +65,9 @@ module AgentSandbox
 
       def stop
         return unless @sandbox_id
+        # Only clear state if DELETE actually succeeded. On failure, keep
+        # @sandbox_id so start() can refuse rather than orphan the remote
+        # sandbox and leak another one.
         control_request(:delete, "/sandboxes/#{@sandbox_id}", expect_json: false)
         @sandbox_id = nil
       end

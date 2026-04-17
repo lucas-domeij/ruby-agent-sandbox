@@ -63,21 +63,32 @@ module AgentSandbox
       @backend.stop
     end
 
-    # Auto-start, yield, auto-stop. If both the block and cleanup raise,
-    # surface the block error as the primary cause and attach cleanup's
-    # message so neither failure is silently lost.
+    # Auto-start, yield, auto-stop. Cleanup runs on normal return, on
+    # exceptions, and on non-local exits (return/break/throw). If both the
+    # block and cleanup raise, we preserve the block error's class and
+    # backtrace and mention cleanup failure in the message so neither
+    # failure is silently lost.
     def open
       start
-      yield self
-    rescue => block_error
+      block_error = nil
       begin
-        stop
-      rescue => cleanup_error
-        raise Error, "#{block_error.class}: #{block_error.message} (cleanup also failed: #{cleanup_error.message})"
+        yield self
+      rescue => e
+        block_error = e
+        raise
+      ensure
+        begin
+          stop
+        rescue => cleanup_error
+          if block_error
+            raise block_error.class,
+                  "#{block_error.message} (cleanup also failed: #{cleanup_error.message})",
+                  block_error.backtrace
+          else
+            raise
+          end
+        end
       end
-      raise
-    else
-      stop
     end
     alias_method :with, :open
 

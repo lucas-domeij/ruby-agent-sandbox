@@ -185,4 +185,20 @@ end
 assert.("cert verify failure -> ConnectError", raised.is_a?(AgentSandbox::ConnectError))
 assert.("cert verify failure attempted exactly once", call_count == 1, "calls=#{call_count}")
 
+# --- orphan prevention: start must refuse when prior sandbox_id still set ---
+puts "[E2B#start refuses to provision while a previous sandbox_id is unresolved]"
+orphan_backend = AgentSandbox::Backends::E2B.allocate
+orphan_backend.instance_variable_set(:@sandbox_id, "leftover-from-failed-stop")
+raised = nil
+begin
+  orphan_backend.start
+rescue AgentSandbox::Error => e
+  raised = e.message
+end
+assert.(
+  "start refuses with stale sandbox_id",
+  raised && raised.include?("leftover-from-failed-stop") && raised.include?("still tracked"),
+  raised.inspect
+)
+
 TestHelper.done(fails, label: "e2b error mapping")

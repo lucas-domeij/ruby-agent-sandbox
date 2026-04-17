@@ -79,14 +79,22 @@ backend.define_singleton_method(:stop) { raise AgentSandbox::Error, "rm failed t
 sandbox = AgentSandbox::Sandbox.new(backend)
 raised = nil
 begin
-  sandbox.open { |_| raise "original block boom" }
-rescue AgentSandbox::Error => e
-  raised = e.message
+  sandbox.open { |_| raise ArgumentError, "original block boom" }
+rescue => e
+  raised = e
 end
+assert.("combined error keeps original class", raised.is_a?(ArgumentError), raised.inspect)
 assert.(
-  "block error + cleanup error combined",
-  raised && raised.include?("original block boom") && raised.include?("cleanup also failed"),
-  raised.inspect
+  "combined error message mentions both failures",
+  raised && raised.message.include?("original block boom") && raised.message.include?("cleanup also failed"),
+  raised.message.inspect
+)
+# Backtrace should point into the test (where the block raised), not into
+# sandbox.rb's ensure clause — that's what "preserve backtrace" means.
+assert.(
+  "combined error backtrace points at original raise site",
+  raised.backtrace && raised.backtrace.any? { |l| l.include?("docker_lifecycle_test.rb") },
+  raised.backtrace&.first
 )
 
 puts "[Sandbox#open: clean cleanup re-raises original block error untouched]"
@@ -103,6 +111,39 @@ rescue ArgumentError => e
 end
 assert.("original block error preserved", raised == "picky", raised.inspect)
 assert.("stop still ran", stop_called)
+
+puts "[Sandbox#open runs stop on non-exception exits (return/break/throw)]"
+def run_with_return(sandbox)
+  sandbox.open { |_| return :early }
+end
+
+backend = fresh_backend
+events = []
+backend.define_singleton_method(:start) { events << :start; @started = true }
+backend.define_singleton_method(:stop)  { events << :stop;  @started = false }
+sandbox = AgentSandbox::Sandbox.new(backend)
+result = run_with_return(sandbox)
+assert.("return from block still unwinds",  result == :early)
+assert.("stop ran on return-from-block",    events == [:start, :stop], events.inspect)
+
+events.clear
+backend2 = fresh_backend
+backend2.define_singleton_method(:start) { events << :start; @started = true }
+backend2.define_singleton_method(:stop)  { events << :stop;  @started = false }
+sandbox2 = AgentSandbox::Sandbox.new(backend2)
+catch(:bail) { sandbox2.open { |_| throw :bail } }
+assert.("stop ran on throw-from-block", events == [:start, :stop], events.inspect)
+
+events.clear
+backend3 = fresh_backend
+backend3.define_singleton_method(:start) { events << :start; @started = true }
+backend3.define_singleton_method(:stop)  { events << :stop;  @started = false }
+sandbox3 = AgentSandbox::Sandbox.new(backend3)
+loop do
+  sandbox3.open { |_| break }
+  break
+end
+assert.("stop ran on break-from-block", events == [:start, :stop], events.inspect)
 
 puts "[Sandbox#open and #with happy-path parity]"
 backend = fresh_backend
