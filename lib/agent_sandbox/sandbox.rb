@@ -57,14 +57,26 @@ module AgentSandbox
 
     def stop
       return unless @started
-      @backend.stop
+      # Always flip @started so a failed backend.stop doesn't leave the
+      # wrapper thinking it's still live (next #start would become a no-op).
       @started = false
+      @backend.stop
     end
 
+    # Auto-start, yield, auto-stop. If both the block and cleanup raise,
+    # surface the block error as the primary cause and attach cleanup's
+    # message so neither failure is silently lost.
     def open
       start
       yield self
-    ensure
+    rescue => block_error
+      begin
+        stop
+      rescue => cleanup_error
+        raise Error, "#{block_error.class}: #{block_error.message} (cleanup also failed: #{cleanup_error.message})"
+      end
+      raise
+    else
       stop
     end
     alias_method :with, :open
