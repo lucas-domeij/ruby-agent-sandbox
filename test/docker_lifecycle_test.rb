@@ -119,31 +119,32 @@ backend.define_singleton_method(:exec) { |_| AgentSandbox::ExecResult.new(stdout
 sandbox.exec("true")
 assert.("after failed stop, next op triggers fresh start", start_calls == 1, "calls=#{start_calls}")
 
-puts "[Sandbox#open: block error preserved when cleanup also fails]"
+puts "[Sandbox#open: dual-failure wraps both errors in CleanupError, cause chain intact]"
 backend = fresh_backend
 backend.define_singleton_method(:start) { @started = true }
 backend.define_singleton_method(:stop) { raise AgentSandbox::Error, "rm failed too" }
 sandbox = AgentSandbox::Sandbox.new(backend)
 raised = nil
+original_block = nil
 begin
-  sandbox.open { |_| raise ArgumentError, "original block boom" }
+  sandbox.open do |_|
+    original_block = ArgumentError.new("original block boom")
+    raise original_block
+  end
 rescue => e
   raised = e
 end
-assert.("combined error keeps original class", raised.is_a?(ArgumentError), raised.inspect)
-assert.("combined error keeps original message", raised.message == "original block boom", raised.message.inspect)
-assert.(
-  "combined error backtrace points at original raise site",
-  raised.backtrace && raised.backtrace.any? { |l| l.include?("docker_lifecycle_test.rb") },
-  raised.backtrace&.first
-)
-assert.(
-  "cleanup failure reachable via #cleanup_error",
-  raised.respond_to?(:cleanup_error) &&
-    raised.cleanup_error.is_a?(AgentSandbox::Error) &&
-    raised.cleanup_error.message.include?("rm failed too"),
-  raised.respond_to?(:cleanup_error) ? raised.cleanup_error.inspect : "no accessor"
-)
+assert.("wrapped as CleanupError", raised.is_a?(AgentSandbox::CleanupError), raised.class.to_s)
+assert.("CleanupError#block_error is the original", raised.block_error.equal?(original_block))
+assert.("CleanupError#cleanup_error is the stop failure",
+        raised.cleanup_error.is_a?(AgentSandbox::Error) && raised.cleanup_error.message.include?("rm failed too"),
+        raised.cleanup_error.inspect)
+assert.("cause chain surfaces block error for default reporters",
+        raised.cause.equal?(original_block),
+        "cause=#{raised.cause.inspect}")
+assert.("full_message shows both errors (observability)",
+        raised.full_message.include?("original block boom") && raised.full_message.include?("rm failed too"),
+        "missing content in full_message")
 
 puts "[Sandbox#open: dual-failure preserves block_error's original cause chain]"
 backend = fresh_backend
@@ -164,11 +165,12 @@ begin
 rescue => e
   raised = e
 end
-assert.("top-level is RuntimeError", raised.is_a?(RuntimeError), raised.inspect)
-assert.("original cause chain preserved (not clobbered by cleanup)",
-        raised.cause.equal?(original_root),
-        "cause=#{raised.cause.inspect} expected=#{original_root.inspect}")
-assert.("cleanup still reachable via #cleanup_error",
+assert.("top-level is CleanupError", raised.is_a?(AgentSandbox::CleanupError), raised.inspect)
+assert.("cause is the block error (RuntimeError)", raised.cause.is_a?(RuntimeError), raised.cause.inspect)
+assert.("block_error's own cause chain preserved (not clobbered)",
+        raised.cause.cause.equal?(original_root),
+        "cause.cause=#{raised.cause.cause.inspect} expected=#{original_root.inspect}")
+assert.("cleanup reachable via #cleanup_error",
         raised.cleanup_error.is_a?(AgentSandbox::Error) && raised.cleanup_error.message.include?("stop boom"),
         raised.cleanup_error.inspect)
 
@@ -187,27 +189,30 @@ http_orig = AgentSandbox::HttpError.new(status: 502, body: "bad gateway")
   rescue => e
     raised = e
   end
-  assert.("#{label}: class preserved", raised.class == original.class, raised.class.to_s)
-  assert.("#{label}: message preserved", raised.message == original.message, raised.message)
+  assert.("#{label}: wrapped as CleanupError", raised.is_a?(AgentSandbox::CleanupError), raised.class.to_s)
+  assert.("#{label}: block_error preserves class", raised.block_error.class == original.class,
+          raised.block_error.class.to_s)
+  assert.("#{label}: block_error preserves identity", raised.block_error.equal?(original))
   assert.("#{label}: cleanup reachable via #cleanup_error",
           raised.cleanup_error.is_a?(AgentSandbox::Error) && raised.cleanup_error.message.include?("stop boom"),
           raised.cleanup_error.inspect)
 end
 
-# Spot-check: ExecError-specific ivars survive the clone
+# Spot-check: ExecError-specific ivars on the original survive (same object).
 backend2 = fresh_backend
 backend2.define_singleton_method(:start) { @started = true }
 backend2.define_singleton_method(:stop) { raise AgentSandbox::Error, "stop boom" }
 sandbox2 = AgentSandbox::Sandbox.new(backend2)
+exec_err = AgentSandbox::ExecError.new(status: 42, stdout: "S", stderr: "E")
 raised = nil
 begin
-  sandbox2.open { |_| raise AgentSandbox::ExecError.new(status: 42, stdout: "S", stderr: "E") }
-rescue AgentSandbox::ExecError => e
+  sandbox2.open { |_| raise exec_err }
+rescue AgentSandbox::CleanupError => e
   raised = e
 end
-assert.("ExecError#status preserved through clone", raised.status == 42, raised.status.inspect)
-assert.("ExecError#stderr preserved through clone", raised.stderr == "E", raised.stderr.inspect)
-assert.("ExecError#stdout preserved through clone", raised.stdout == "S", raised.stdout.inspect)
+assert.("ExecError#status preserved on block_error", raised.block_error.status == 42, raised.block_error.status.inspect)
+assert.("ExecError#stderr preserved on block_error", raised.block_error.stderr == "E", raised.block_error.stderr.inspect)
+assert.("ExecError#stdout preserved on block_error", raised.block_error.stdout == "S", raised.block_error.stdout.inspect)
 
 puts "[Sandbox#open: clean cleanup re-raises original block error untouched]"
 backend = fresh_backend

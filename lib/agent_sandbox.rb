@@ -31,6 +31,24 @@ module AgentSandbox
     end
   end
 
+  # Raised when BOTH the user's block AND sandbox cleanup fail. The `cause`
+  # slot carries the original block error (so its own cause chain survives
+  # untouched, and default exception reporting — full_message, APMs, log
+  # handlers that traverse `cause` — surfaces the whole story). The cleanup
+  # failure is exposed via #cleanup_error for callers that need it
+  # individually.
+  class CleanupError < Error
+    attr_reader :block_error, :cleanup_error
+    def initialize(block_error, cleanup_error)
+      @block_error = block_error
+      @cleanup_error = cleanup_error
+      super(
+        "sandbox block raised #{block_error.class}: #{block_error.message}; " \
+        "then cleanup raised #{cleanup_error.class}: #{cleanup_error.message}"
+      )
+    end
+  end
+
   BACKENDS = {
     docker: Backends::Docker,
     e2b: Backends::E2B

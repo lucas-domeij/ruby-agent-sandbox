@@ -249,6 +249,68 @@ end
 assert.("second stop is no-op (cleared state)", raised.nil?, raised&.inspect)
 assert.("no HTTP traffic on already-cleared stop", request_log.empty?, request_log.inspect)
 
+# --- generic 404 (NOT a real sandbox-not-found response) must NOT be swallowed ---
+# Codex finding: a bare 404 from path drift, CDN/proxy misrouting, or a
+# degraded control-plane endpoint must not be treated as proof of deletion
+# — otherwise the caller loses the handle to a still-running, still-billing
+# sandbox. Only a body that actually identifies as "sandbox not found"
+# clears @sandbox_id.
+puts "[E2B#stop: generic 404 (wrong path / proxy error) keeps @sandbox_id set]"
+generic404 = AgentSandbox::Backends::E2B.allocate
+generic404.instance_variable_set(:@api_key, "test")
+generic404.instance_variable_set(:@sandbox_id, "sb-still-running")
+generic404.instance_variable_set(:@open_timeout, 1)
+generic404.instance_variable_set(:@read_timeout, 1)
+generic404.instance_variable_set(:@max_retries, 0)
+generic404.define_singleton_method(:backoff_for) { |_| 0 }
+
+fake_http_proxy404 = Object.new
+fake_http_proxy404.define_singleton_method(:request) do |_req|
+  FakeResp.new("404", "{\"error\":\"proxy endpoint not found\"}")
+end
+generic404.define_singleton_method(:http_for) { |_uri| fake_http_proxy404 }
+
+raised = nil
+begin
+  generic404.stop
+rescue AgentSandbox::SandboxNotFound => e
+  raised = e
+end
+assert.("generic 404 (proxy error) surfaces as SandboxNotFound", raised.is_a?(AgentSandbox::SandboxNotFound),
+        raised&.inspect)
+assert.("generic 404 does NOT clear @sandbox_id (caller can retry/escalate)",
+        generic404.instance_variable_get(:@sandbox_id) == "sb-still-running",
+        "sandbox_id=#{generic404.instance_variable_get(:@sandbox_id).inspect}")
+
+# Various real "sandbox not found" body phrasings should be recognised.
+puts "[E2B#stop: recognises real sandbox-not-found markers]"
+[
+  "{\"message\":\"sandbox not found\"}",
+  "{\"message\":\"Sandbox does not exist\"}",
+  "{\"message\":\"sandbox was not found\",\"code\":404}",
+  "{\"message\":\"No such sandbox\"}"
+].each do |body|
+  b = AgentSandbox::Backends::E2B.allocate
+  b.instance_variable_set(:@api_key, "test")
+  b.instance_variable_set(:@sandbox_id, "sb-x")
+  b.instance_variable_set(:@open_timeout, 1)
+  b.instance_variable_set(:@read_timeout, 1)
+  b.instance_variable_set(:@max_retries, 0)
+  b.define_singleton_method(:backoff_for) { |_| 0 }
+  fake = Object.new
+  fake.define_singleton_method(:request) { |_| FakeResp.new("404", body) }
+  b.define_singleton_method(:http_for) { |_| fake }
+  raised = nil
+  begin
+    b.stop
+  rescue => e
+    raised = e
+  end
+  assert.("real not-found body (#{body[0, 40]}…) clears state",
+          raised.nil? && b.instance_variable_get(:@sandbox_id).nil?,
+          "raised=#{raised.inspect} sbx=#{b.instance_variable_get(:@sandbox_id).inspect}")
+end
+
 # --- wrapper-level E2B retry-stop recovery ---
 # Codex finding: after a failed E2B stop, the public Sandbox API must let the
 # caller retry cleanup and then continue. Otherwise the wrapper deadlocks

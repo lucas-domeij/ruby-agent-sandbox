@@ -66,9 +66,11 @@ module AgentSandbox
 
     # Auto-start, yield, auto-stop. Cleanup runs on normal return, on
     # exceptions, and on non-local exits (return/break/throw). If both the
-    # block and cleanup raise, the original block error is re-raised
-    # untouched and cleanup_error is attached as `cause` so neither
-    # failure is silently lost.
+    # block and cleanup raise, surface a CleanupError whose `cause` is the
+    # original block error — so the block error's own cause chain rides
+    # along (full_message / APMs / default log handlers traverse `cause`
+    # and will print both failures) — and whose #cleanup_error returns the
+    # cleanup failure for callers that want to branch on it.
     def open
       start
       block_error = nil
@@ -82,16 +84,7 @@ module AgentSandbox
           stop
         rescue => cleanup_error
           if block_error
-            # Clone via Exception#exception so we preserve class, message,
-            # backtrace, and all instance vars (matters for ExecError /
-            # HttpError, which use kwarg-only initializers). We do NOT use
-            # the `cause` slot — that belongs to the block error's original
-            # chain. Cleanup is exposed via a singleton #cleanup_error
-            # accessor so callers can reach it without losing root cause.
-            copy = block_error.exception(block_error.message)
-            copy.set_backtrace(block_error.backtrace) if block_error.backtrace
-            copy.define_singleton_method(:cleanup_error) { cleanup_error }
-            raise copy
+            raise CleanupError.new(block_error, cleanup_error), cause: block_error
           else
             raise
           end

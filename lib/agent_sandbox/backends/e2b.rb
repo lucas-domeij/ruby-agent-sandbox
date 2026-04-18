@@ -63,19 +63,37 @@ module AgentSandbox
         self
       end
 
+      # Positively match E2B's real "sandbox not found" response so we don't
+      # treat a 404 from path drift / proxy misrouting / a degraded control-
+      # plane endpoint as proof the sandbox is gone (and forget the handle
+      # to a still-running, still-billing VM).
+      SANDBOX_NOT_FOUND_MARKERS = [
+        "sandbox not found",
+        "sandbox does not exist",
+        "sandbox was not found",
+        "no such sandbox"
+      ].freeze
+
       def stop
         return unless @sandbox_id
         begin
           control_request(:delete, "/sandboxes/#{@sandbox_id}", expect_json: false)
-        rescue SandboxNotFound
-          # Already gone (e.g. a previous DELETE timed out after the server
-          # had already removed it). Treat as success so callers can retry
-          # stop to recover from ambiguous-delete states.
+        rescue SandboxNotFound => e
+          # Only swallow 404s that are genuinely "this sandbox is gone".
+          # Anything else (generic 404, proxy error, unexpected body) keeps
+          # @sandbox_id set so the caller can retry or escalate rather than
+          # silently orphan a paid sandbox.
+          raise unless sandbox_not_found_response?(e)
         end
         # Only clear @sandbox_id once we've confirmed the sandbox is gone
-        # (2xx or 404). Other failures keep it set so start() can refuse
-        # rather than orphan the remote sandbox.
+        # (2xx or validated 404). Other failures keep it set so start()
+        # can refuse rather than orphan the remote sandbox.
         @sandbox_id = nil
+      end
+
+      def sandbox_not_found_response?(error)
+        msg = error.message.to_s.downcase
+        SANDBOX_NOT_FOUND_MARKERS.any? { |marker| msg.include?(marker) }
       end
 
       def write_file(path, content)
