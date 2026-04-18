@@ -84,12 +84,14 @@ module AgentSandbox
           if block_error
             # Clone via Exception#exception so we preserve class, message,
             # backtrace, and all instance vars (matters for ExecError /
-            # HttpError, which use kwarg-only initializers). Cloning is
-            # required because Ruby refuses to set `cause` on the same
-            # in-flight object — it would trigger the circular-cause guard.
+            # HttpError, which use kwarg-only initializers). We do NOT use
+            # the `cause` slot — that belongs to the block error's original
+            # chain. Cleanup is exposed via a singleton #cleanup_error
+            # accessor so callers can reach it without losing root cause.
             copy = block_error.exception(block_error.message)
             copy.set_backtrace(block_error.backtrace) if block_error.backtrace
-            raise copy, cause: cleanup_error
+            copy.define_singleton_method(:cleanup_error) { cleanup_error }
+            raise copy
           else
             raise
           end

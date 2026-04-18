@@ -201,6 +201,54 @@ assert.(
   raised.inspect
 )
 
+# --- real E2B#stop: ambiguous-delete (timeout then 404) is idempotent success ---
+# Codex finding: the common ambiguous-delete path is "DELETE timed out after the
+# server already removed the sandbox". The retry then gets 404. E2B#stop must
+# treat that as success — otherwise callers deadlock on a permanently-raising
+# stop, and @sandbox_id stays set forever (blocking start).
+puts "[E2B#stop: DELETE timeout then 404 clears state without raising]"
+real = AgentSandbox::Backends::E2B.allocate
+real.instance_variable_set(:@api_key, "test")
+real.instance_variable_set(:@sandbox_id, "sb-timeout-then-404")
+real.instance_variable_set(:@open_timeout, 1)
+real.instance_variable_set(:@read_timeout, 1)
+real.instance_variable_set(:@max_retries, 3)
+real.define_singleton_method(:backoff_for) { |_| 0 }
+
+request_log = []
+fake_http_404 = Object.new
+fake_http_404.define_singleton_method(:request) do |req|
+  request_log << req.method
+  # First DELETE: timeout (server already processed). Retry: 404.
+  if request_log.size == 1
+    raise Net::ReadTimeout, "DELETE hung"
+  else
+    FakeResp.new("404", "{\"code\":404,\"message\":\"sandbox not found\"}")
+  end
+end
+real.define_singleton_method(:http_for) { |_uri| fake_http_404 }
+
+raised = nil
+begin
+  real.stop
+rescue => e
+  raised = e
+end
+assert.("timeout-then-404 does not raise", raised.nil?, raised&.inspect)
+assert.("sandbox_id cleared after ambiguous delete", real.instance_variable_get(:@sandbox_id).nil?)
+assert.("DELETE was retried after timeout", request_log == %w[DELETE DELETE], request_log.inspect)
+
+# A second stop must be a clean no-op (sandbox_id already nil, nothing to do).
+request_log.clear
+raised = nil
+begin
+  real.stop
+rescue => e
+  raised = e
+end
+assert.("second stop is no-op (cleared state)", raised.nil?, raised&.inspect)
+assert.("no HTTP traffic on already-cleared stop", request_log.empty?, request_log.inspect)
+
 # --- wrapper-level E2B retry-stop recovery ---
 # Codex finding: after a failed E2B stop, the public Sandbox API must let the
 # caller retry cleanup and then continue. Otherwise the wrapper deadlocks

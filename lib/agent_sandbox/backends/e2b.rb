@@ -65,10 +65,16 @@ module AgentSandbox
 
       def stop
         return unless @sandbox_id
-        # Only clear state if DELETE actually succeeded. On failure, keep
-        # @sandbox_id so start() can refuse rather than orphan the remote
-        # sandbox and leak another one.
-        control_request(:delete, "/sandboxes/#{@sandbox_id}", expect_json: false)
+        begin
+          control_request(:delete, "/sandboxes/#{@sandbox_id}", expect_json: false)
+        rescue SandboxNotFound
+          # Already gone (e.g. a previous DELETE timed out after the server
+          # had already removed it). Treat as success so callers can retry
+          # stop to recover from ambiguous-delete states.
+        end
+        # Only clear @sandbox_id once we've confirmed the sandbox is gone
+        # (2xx or 404). Other failures keep it set so start() can refuse
+        # rather than orphan the remote sandbox.
         @sandbox_id = nil
       end
 

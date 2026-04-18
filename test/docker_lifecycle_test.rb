@@ -1,18 +1,25 @@
 require_relative "test_helper"
+require "open3"
 
 fails, assert = TestHelper.runner
 
-# Build a Docker backend without running `docker run`, then stub just the
-# `system` call (the one `stop` uses) so the real Docker#stop logic runs.
+# Stub Open3.capture3 so Docker#stop doesn't touch a real daemon.
+# Tests set STUB_CAPTURE3 = [stdout, stderr, status] before invoking stop.
+STUB_SUCCESS = Struct.new(:success?)
+STUB_CAPTURE3 = { resp: ["", "", STUB_SUCCESS.new(true)] }
+Open3.define_singleton_method(:capture3) { |*_args, **_opts| STUB_CAPTURE3[:resp] }
+
 def fresh_backend(ports: [8080])
   b = AgentSandbox::Backends::Docker.allocate
   b.instance_variable_set(:@name, "agent-sandbox-test")
   b.instance_variable_set(:@ports, ports)
   b.instance_variable_set(:@port_map, {})
   b.instance_variable_set(:@started, false)
-  b.instance_variable_set(:@system_result, true)
-  def b.system(*_args, **_opts); @system_result; end
   b
+end
+
+def stub_rm!(stdout: "", stderr: "", ok: true)
+  STUB_CAPTURE3[:resp] = [stdout, stderr, STUB_SUCCESS.new(ok)]
 end
 
 puts "[port_url fails after stop, even though mapping was cached]"
@@ -21,6 +28,7 @@ backend.instance_variable_set(:@started, true)
 backend.instance_variable_set(:@port_map, { 8080 => { host: "127.0.0.1", port: 49153, bind: "127.0.0.1", family: :ipv4 } })
 assert.("port_url works while started", backend.port_url(8080) == "http://127.0.0.1:49153")
 
+stub_rm!(ok: true)
 backend.stop
 raised = nil
 begin
@@ -32,27 +40,68 @@ assert.("port_url raises after stop", raised && raised.include?("not started"), 
 assert.("port_map cleared after stop", backend.instance_variable_get(:@port_map) == {})
 assert.("started flag cleared after stop", backend.instance_variable_get(:@started) == false)
 
-puts "[stop raises when docker rm -f fails, but still clears state]"
+puts "[Docker#stop is idempotent: 'No such container' counts as success]"
+backend = fresh_backend
+backend.instance_variable_set(:@started, true)
+stub_rm!(stderr: "Error: No such container: agent-sandbox-test\n", ok: false)
+raised = nil
+begin
+  backend.stop
+rescue AgentSandbox::Error => e
+  raised = e
+end
+assert.("missing-container stop returns cleanly", raised.nil?, raised&.message)
+assert.("state cleared on idempotent stop", backend.instance_variable_get(:@started) == false)
+
+puts "[Double stop through Sandbox doesn't raise]"
+backend = fresh_backend
+sandbox_dbl = AgentSandbox::Sandbox.new(backend)
+sandbox_dbl.instance_variable_set(:@started, true)
+backend.instance_variable_set(:@started, true)
+stub_rm!(ok: true)
+sandbox_dbl.stop
+stub_rm!(stderr: "Error: No such container: agent-sandbox-test\n", ok: false)
+raised = nil
+begin
+  sandbox_dbl.stop
+rescue => e
+  raised = e
+end
+assert.("second stop does not raise", raised.nil?, raised&.inspect)
+
+puts "[stop-before-start does not raise]"
+backend = fresh_backend
+sandbox_ns = AgentSandbox::Sandbox.new(backend)
+stub_rm!(stderr: "Error: No such container: agent-sandbox-test\n", ok: false)
+raised = nil
+begin
+  sandbox_ns.stop
+rescue => e
+  raised = e
+end
+assert.("never-started stop does not raise", raised.nil?, raised&.inspect)
+
+puts "[stop raises when docker rm -f fails for real, but still clears state]"
 backend = fresh_backend
 backend.instance_variable_set(:@started, true)
 backend.instance_variable_set(:@port_map, { 8080 => { host: "127.0.0.1", port: 49153, bind: "127.0.0.1", family: :ipv4 } })
-backend.instance_variable_set(:@system_result, false)
+stub_rm!(stderr: "docker daemon unreachable", ok: false)
 raised = nil
 begin
   backend.stop
 rescue AgentSandbox::Error => e
   raised = e.message
 end
-assert.("stop raises on rm failure", raised && raised.include?("docker rm"), raised.inspect)
+assert.("real rm failure raises", raised && raised.include?("docker daemon unreachable"), raised.inspect)
 assert.("state cleared even when rm fails", backend.instance_variable_get(:@started) == false)
 assert.("port_map cleared even when rm fails", backend.instance_variable_get(:@port_map) == {})
 
 puts "[Sandbox#stop clears wrapper state even when backend.stop raises]"
 backend = fresh_backend
 backend.instance_variable_set(:@started, true)
-backend.instance_variable_set(:@system_result, false) # docker rm -f will fail
 sandbox = AgentSandbox::Sandbox.new(backend)
 sandbox.instance_variable_set(:@started, true)
+stub_rm!(stderr: "docker daemon unreachable", ok: false)
 raised = nil
 begin
   sandbox.stop
@@ -63,8 +112,7 @@ assert.("Sandbox#stop re-raises backend cleanup failure", raised.is_a?(AgentSand
 assert.("Sandbox wrapper @started cleared despite backend failure",
         sandbox.instance_variable_get(:@started) == false)
 
-# Follow-up: after a rescued stop error, #exec must NOT skip restart.
-# We stub start so we can observe whether the wrapper re-runs it.
+# After failed stop, next op must trigger a fresh start (not skip it).
 start_calls = 0
 backend.define_singleton_method(:start) { start_calls += 1; @started = true }
 backend.define_singleton_method(:exec) { |_| AgentSandbox::ExecResult.new(stdout: "", stderr: "", status: 0) }
@@ -73,7 +121,6 @@ assert.("after failed stop, next op triggers fresh start", start_calls == 1, "ca
 
 puts "[Sandbox#open: block error preserved when cleanup also fails]"
 backend = fresh_backend
-# start/stop both stubbed at the backend level so we can trigger them.
 backend.define_singleton_method(:start) { @started = true }
 backend.define_singleton_method(:stop) { raise AgentSandbox::Error, "rm failed too" }
 sandbox = AgentSandbox::Sandbox.new(backend)
@@ -91,10 +138,39 @@ assert.(
   raised.backtrace&.first
 )
 assert.(
-  "cleanup failure reachable via #cause",
-  raised.cause.is_a?(AgentSandbox::Error) && raised.cause.message.include?("rm failed too"),
-  raised.cause.inspect
+  "cleanup failure reachable via #cleanup_error",
+  raised.respond_to?(:cleanup_error) &&
+    raised.cleanup_error.is_a?(AgentSandbox::Error) &&
+    raised.cleanup_error.message.include?("rm failed too"),
+  raised.respond_to?(:cleanup_error) ? raised.cleanup_error.inspect : "no accessor"
 )
+
+puts "[Sandbox#open: dual-failure preserves block_error's original cause chain]"
+backend = fresh_backend
+backend.define_singleton_method(:start) { @started = true }
+backend.define_singleton_method(:stop) { raise AgentSandbox::Error, "stop boom" }
+sandbox = AgentSandbox::Sandbox.new(backend)
+original_root = nil
+raised = nil
+begin
+  sandbox.open do |_|
+    begin
+      raise IOError, "disk gone"
+    rescue
+      original_root = $!
+      raise RuntimeError, "wrapping"
+    end
+  end
+rescue => e
+  raised = e
+end
+assert.("top-level is RuntimeError", raised.is_a?(RuntimeError), raised.inspect)
+assert.("original cause chain preserved (not clobbered by cleanup)",
+        raised.cause.equal?(original_root),
+        "cause=#{raised.cause.inspect} expected=#{original_root.inspect}")
+assert.("cleanup still reachable via #cleanup_error",
+        raised.cleanup_error.is_a?(AgentSandbox::Error) && raised.cleanup_error.message.include?("stop boom"),
+        raised.cleanup_error.inspect)
 
 puts "[Sandbox#open: kwarg-initialized library exceptions survive dual-failure]"
 exec_orig = AgentSandbox::ExecError.new(status: 7, stdout: "out", stderr: "err")
@@ -113,12 +189,12 @@ http_orig = AgentSandbox::HttpError.new(status: 502, body: "bad gateway")
   end
   assert.("#{label}: class preserved", raised.class == original.class, raised.class.to_s)
   assert.("#{label}: message preserved", raised.message == original.message, raised.message)
-  assert.("#{label}: cleanup attached as cause",
-          raised.cause.is_a?(AgentSandbox::Error) && raised.cause.message.include?("stop boom"),
-          raised.cause.inspect)
+  assert.("#{label}: cleanup reachable via #cleanup_error",
+          raised.cleanup_error.is_a?(AgentSandbox::Error) && raised.cleanup_error.message.include?("stop boom"),
+          raised.cleanup_error.inspect)
 end
 
-# Spot-check: ExecError-specific ivars survive the clone (status, stderr, stdout)
+# Spot-check: ExecError-specific ivars survive the clone
 backend2 = fresh_backend
 backend2.define_singleton_method(:start) { @started = true }
 backend2.define_singleton_method(:stop) { raise AgentSandbox::Error, "stop boom" }
@@ -202,8 +278,7 @@ puts "[start rollback: resolve_port_map failure triggers stop]"
 backend = fresh_backend
 backend.define_singleton_method(:run!) { |_cmd| "container-id" }
 backend.define_singleton_method(:resolve_port_map) { raise AgentSandbox::Error, "port resolve exploded" }
-# Leave real Docker#stop in place — it will use the stubbed `system`.
-backend.instance_variable_set(:@system_result, true)
+stub_rm!(ok: true)
 raised = nil
 begin
   backend.start
@@ -217,7 +292,7 @@ puts "[start rollback: cleanup failure surfaces both errors]"
 backend = fresh_backend
 backend.define_singleton_method(:run!) { |_cmd| "container-id" }
 backend.define_singleton_method(:resolve_port_map) { raise AgentSandbox::Error, "port resolve exploded" }
-backend.instance_variable_set(:@system_result, false) # real Docker#stop will raise
+stub_rm!(stderr: "daemon gone", ok: false)
 raised = nil
 begin
   backend.start

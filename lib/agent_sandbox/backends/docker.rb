@@ -123,8 +123,12 @@ module AgentSandbox
         # container (port_url must raise after stop, even if rm fails).
         @started = false
         @port_map = {}
-        ok = system("docker", "rm", "-f", @name, out: File::NULL, err: File::NULL)
-        raise Error, "docker rm -f #{@name} failed" unless ok
+        out, err, status = Open3.capture3("docker", "rm", "-f", @name)
+        return if status.success?
+        # "No such container" = already gone (double-stop, or a retry after a
+        # previous rm that actually succeeded). Treat as idempotent success.
+        return if err.include?("No such container")
+        raise Error, "docker rm -f #{@name} failed: #{(err + out).strip}"
       end
 
       private
