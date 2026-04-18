@@ -84,18 +84,54 @@ rescue => e
   raised = e
 end
 assert.("combined error keeps original class", raised.is_a?(ArgumentError), raised.inspect)
-assert.(
-  "combined error message mentions both failures",
-  raised && raised.message.include?("original block boom") && raised.message.include?("cleanup also failed"),
-  raised.message.inspect
-)
-# Backtrace should point into the test (where the block raised), not into
-# sandbox.rb's ensure clause — that's what "preserve backtrace" means.
+assert.("combined error keeps original message", raised.message == "original block boom", raised.message.inspect)
 assert.(
   "combined error backtrace points at original raise site",
   raised.backtrace && raised.backtrace.any? { |l| l.include?("docker_lifecycle_test.rb") },
   raised.backtrace&.first
 )
+assert.(
+  "cleanup failure reachable via #cause",
+  raised.cause.is_a?(AgentSandbox::Error) && raised.cause.message.include?("rm failed too"),
+  raised.cause.inspect
+)
+
+puts "[Sandbox#open: kwarg-initialized library exceptions survive dual-failure]"
+exec_orig = AgentSandbox::ExecError.new(status: 7, stdout: "out", stderr: "err")
+http_orig = AgentSandbox::HttpError.new(status: 502, body: "bad gateway")
+
+[["ExecError", exec_orig], ["HttpError", http_orig]].each do |label, original|
+  backend2 = fresh_backend
+  backend2.define_singleton_method(:start) { @started = true }
+  backend2.define_singleton_method(:stop) { raise AgentSandbox::Error, "stop boom" }
+  sandbox2 = AgentSandbox::Sandbox.new(backend2)
+  raised = nil
+  begin
+    sandbox2.open { |_| raise original }
+  rescue => e
+    raised = e
+  end
+  assert.("#{label}: class preserved", raised.class == original.class, raised.class.to_s)
+  assert.("#{label}: message preserved", raised.message == original.message, raised.message)
+  assert.("#{label}: cleanup attached as cause",
+          raised.cause.is_a?(AgentSandbox::Error) && raised.cause.message.include?("stop boom"),
+          raised.cause.inspect)
+end
+
+# Spot-check: ExecError-specific ivars survive the clone (status, stderr, stdout)
+backend2 = fresh_backend
+backend2.define_singleton_method(:start) { @started = true }
+backend2.define_singleton_method(:stop) { raise AgentSandbox::Error, "stop boom" }
+sandbox2 = AgentSandbox::Sandbox.new(backend2)
+raised = nil
+begin
+  sandbox2.open { |_| raise AgentSandbox::ExecError.new(status: 42, stdout: "S", stderr: "E") }
+rescue AgentSandbox::ExecError => e
+  raised = e
+end
+assert.("ExecError#status preserved through clone", raised.status == 42, raised.status.inspect)
+assert.("ExecError#stderr preserved through clone", raised.stderr == "E", raised.stderr.inspect)
+assert.("ExecError#stdout preserved through clone", raised.stdout == "S", raised.stdout.inspect)
 
 puts "[Sandbox#open: clean cleanup re-raises original block error untouched]"
 backend = fresh_backend

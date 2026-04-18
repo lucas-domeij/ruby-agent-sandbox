@@ -56,17 +56,18 @@ module AgentSandbox
     end
 
     def stop
-      return unless @started
-      # Always flip @started so a failed backend.stop doesn't leave the
-      # wrapper thinking it's still live (next #start would become a no-op).
+      # Always invalidate wrapper start-state and delegate, even on retry.
+      # Backends are expected to be idempotent (Docker rm always runs;
+      # E2B short-circuits when @sandbox_id is nil). Without this, a failed
+      # backend cleanup would leave the wrapper unable to retry stop.
       @started = false
       @backend.stop
     end
 
     # Auto-start, yield, auto-stop. Cleanup runs on normal return, on
     # exceptions, and on non-local exits (return/break/throw). If both the
-    # block and cleanup raise, we preserve the block error's class and
-    # backtrace and mention cleanup failure in the message so neither
+    # block and cleanup raise, the original block error is re-raised
+    # untouched and cleanup_error is attached as `cause` so neither
     # failure is silently lost.
     def open
       start
@@ -81,9 +82,14 @@ module AgentSandbox
           stop
         rescue => cleanup_error
           if block_error
-            raise block_error.class,
-                  "#{block_error.message} (cleanup also failed: #{cleanup_error.message})",
-                  block_error.backtrace
+            # Clone via Exception#exception so we preserve class, message,
+            # backtrace, and all instance vars (matters for ExecError /
+            # HttpError, which use kwarg-only initializers). Cloning is
+            # required because Ruby refuses to set `cause` on the same
+            # in-flight object — it would trigger the circular-cause guard.
+            copy = block_error.exception(block_error.message)
+            copy.set_backtrace(block_error.backtrace) if block_error.backtrace
+            raise copy, cause: cleanup_error
           else
             raise
           end

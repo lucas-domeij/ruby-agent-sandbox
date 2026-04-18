@@ -201,4 +201,45 @@ assert.(
   raised.inspect
 )
 
+# --- wrapper-level E2B retry-stop recovery ---
+# Codex finding: after a failed E2B stop, the public Sandbox API must let the
+# caller retry cleanup and then continue. Otherwise the wrapper deadlocks
+# (wrapper @started=false, backend @sandbox_id still set, no way through).
+puts "[Sandbox#stop is retryable after backend cleanup failure]"
+b = AgentSandbox::Backends::E2B.allocate
+b.instance_variable_set(:@sandbox_id, "sb-1")
+delete_attempts = 0
+b.define_singleton_method(:stop) do
+  delete_attempts += 1
+  if delete_attempts == 1
+    raise AgentSandbox::TimeoutError, "DELETE timed out"
+  else
+    @sandbox_id = nil
+  end
+end
+
+sandbox = AgentSandbox::Sandbox.new(b)
+sandbox.instance_variable_set(:@started, true)
+
+raised = nil
+begin
+  sandbox.stop
+rescue AgentSandbox::TimeoutError => e
+  raised = e
+end
+assert.("first stop surfaces backend failure", raised.is_a?(AgentSandbox::TimeoutError))
+assert.("backend still tracks sandbox after failed stop",
+        b.instance_variable_get(:@sandbox_id) == "sb-1")
+
+# Retry — must NOT be a wrapper-level no-op.
+sandbox.stop
+assert.("retried stop actually called backend", delete_attempts == 2, "attempts=#{delete_attempts}")
+assert.("backend cleared after successful retry",
+        b.instance_variable_get(:@sandbox_id).nil?)
+
+# After successful retry, start must be allowed again.
+b.define_singleton_method(:start) { @sandbox_id = "sb-2" }
+sandbox.start
+assert.("start allowed after recovered stop", b.instance_variable_get(:@sandbox_id) == "sb-2")
+
 TestHelper.done(fails, label: "e2b error mapping")
