@@ -87,6 +87,34 @@ sandbox.stop
 The LLM gets four tools: `exec`, `write_file`, `read_file`, `port_url`.
 It decides when to call them.
 
+## Sandbox lifecycle
+
+`exec` / `write_file` / `read_file` all auto-start the sandbox, so the only
+question is **who owns `stop`**. Three common patterns:
+
+```ruby
+# Per-task: fresh sandbox per prompt. Cheap, no state leak, no context
+# carried between turns. `open` auto-starts AND auto-stops.
+AgentSandbox.new(backend: :docker).open { |sb| agent.handle(sb, prompt) }
+
+# Per-conversation: one sandbox for the whole chat. Agent can build on
+# earlier work (installed deps, written files). You own `stop`.
+sb = AgentSandbox.new(backend: :e2b).start
+begin
+  loop { chat.ask(gets.chomp) }
+ensure
+  sb.stop
+end
+
+# Pool: reuse N sandboxes across many tasks. Fastest per-request, but
+# you're responsible for resetting state between tasks.
+pool = 5.times.map { AgentSandbox.new(backend: :e2b).start }
+```
+
+Per-task is the safe default. Go per-conversation when the agent genuinely
+needs continuity (e.g. iterating on a project). Pool only when throughput
+matters more than isolation.
+
 ## API
 
 ```ruby
