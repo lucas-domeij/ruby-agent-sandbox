@@ -63,10 +63,12 @@ module AgentSandbox
         self
       end
 
-      # Positively match E2B's real "sandbox not found" response so we don't
-      # treat a 404 from path drift / proxy misrouting / a degraded control-
-      # plane endpoint as proof the sandbox is gone (and forget the handle
-      # to a still-running, still-billing VM).
+      # E2B's control-plane 404 responses for deleted/missing sandboxes
+      # return JSON with sandbox-specific identifying content. Substrings
+      # we accept inside provider-structured fields only — not anywhere in
+      # an arbitrary response body — so a bare 404 from path drift, a
+      # proxy, or an intermediate error page cannot fool stop into
+      # clearing the handle to a still-running, still-billing sandbox.
       SANDBOX_NOT_FOUND_MARKERS = [
         "sandbox not found",
         "sandbox does not exist",
@@ -79,10 +81,6 @@ module AgentSandbox
         begin
           control_request(:delete, "/sandboxes/#{@sandbox_id}", expect_json: false)
         rescue SandboxNotFound => e
-          # Only swallow 404s that are genuinely "this sandbox is gone".
-          # Anything else (generic 404, proxy error, unexpected body) keeps
-          # @sandbox_id set so the caller can retry or escalate rather than
-          # silently orphan a paid sandbox.
           raise unless sandbox_not_found_response?(e)
         end
         # Only clear @sandbox_id once we've confirmed the sandbox is gone
@@ -91,9 +89,33 @@ module AgentSandbox
         @sandbox_id = nil
       end
 
+      # Structured 404 check: require a JSON body whose provider fields
+      # positively identify "this sandbox is gone". We only trust the
+      # `code`, `type`, `error`, or `message` fields, not substring
+      # matches against the raw body (which would let an HTML proxy page
+      # or CDN error containing the word "sandbox" fool us).
       def sandbox_not_found_response?(error)
-        msg = error.message.to_s.downcase
-        SANDBOX_NOT_FOUND_MARKERS.any? { |marker| msg.include?(marker) }
+        return false unless error.status == 404
+        body = error.body.to_s
+        return false if body.empty?
+        parsed = begin
+          JSON.parse(body)
+        rescue JSON::ParserError
+          return false # non-JSON = not an E2B control-plane response
+        end
+        return false unless parsed.is_a?(Hash)
+
+        code = parsed["code"].to_s.downcase
+        type = parsed["type"].to_s.downcase
+        return true if code.include?("sandbox") && (code.include?("not_found") || code.include?("not found") || code.include?("missing"))
+        return true if type.include?("sandbox") && (type.include?("not_found") || type.include?("not found") || type.include?("missing"))
+
+        %w[message error].each do |field|
+          v = parsed[field].to_s.downcase
+          next if v.empty?
+          return true if SANDBOX_NOT_FOUND_MARKERS.any? { |m| v.include?(m) }
+        end
+        false
       end
 
       def write_file(path, content)
@@ -245,12 +267,13 @@ module AgentSandbox
 
       def raise_for_status!(response, code, what:)
         return if code.between?(200, 299)
-        body = response.body.to_s[0, 300]
+        raw_body = response.body.to_s
+        preview = raw_body[0, 300]
         case code
-        when 401, 403 then raise AuthError, "#{what}: #{code} #{body}"
-        when 404      then raise SandboxNotFound, "#{what}: #{code} #{body}"
-        when 500..599 then raise ServerError, "#{what}: #{code} #{body}"
-        else               raise HttpError.new(status: code, body: body, message: "#{what}: HTTP #{code}: #{body}")
+        when 401, 403 then raise AuthError, "#{what}: #{code} #{preview}"
+        when 404      then raise SandboxNotFound.new("#{what}: #{code} #{preview}", status: code, body: raw_body)
+        when 500..599 then raise ServerError, "#{what}: #{code} #{preview}"
+        else               raise HttpError.new(status: code, body: preview, message: "#{what}: HTTP #{code}: #{preview}")
         end
       end
 

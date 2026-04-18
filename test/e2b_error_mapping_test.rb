@@ -219,11 +219,12 @@ request_log = []
 fake_http_404 = Object.new
 fake_http_404.define_singleton_method(:request) do |req|
   request_log << req.method
-  # First DELETE: timeout (server already processed). Retry: 404.
+  # First DELETE: timeout (server already processed). Retry: 404 with
+  # structured E2B "sandbox not found" body.
   if request_log.size == 1
     raise Net::ReadTimeout, "DELETE hung"
   else
-    FakeResp.new("404", "{\"code\":404,\"message\":\"sandbox not found\"}")
+    FakeResp.new("404", "{\"code\":\"sandbox_not_found\",\"message\":\"sandbox sb-timeout-then-404 not found\"}")
   end
 end
 real.define_singleton_method(:http_for) { |_uri| fake_http_404 }
@@ -249,67 +250,90 @@ end
 assert.("second stop is no-op (cleared state)", raised.nil?, raised&.inspect)
 assert.("no HTTP traffic on already-cleared stop", request_log.empty?, request_log.inspect)
 
-# --- generic 404 (NOT a real sandbox-not-found response) must NOT be swallowed ---
-# Codex finding: a bare 404 from path drift, CDN/proxy misrouting, or a
-# degraded control-plane endpoint must not be treated as proof of deletion
-# — otherwise the caller loses the handle to a still-running, still-billing
-# sandbox. Only a body that actually identifies as "sandbox not found"
-# clears @sandbox_id.
-puts "[E2B#stop: generic 404 (wrong path / proxy error) keeps @sandbox_id set]"
-generic404 = AgentSandbox::Backends::E2B.allocate
-generic404.instance_variable_set(:@api_key, "test")
-generic404.instance_variable_set(:@sandbox_id, "sb-still-running")
-generic404.instance_variable_set(:@open_timeout, 1)
-generic404.instance_variable_set(:@read_timeout, 1)
-generic404.instance_variable_set(:@max_retries, 0)
-generic404.define_singleton_method(:backoff_for) { |_| 0 }
-
-fake_http_proxy404 = Object.new
-fake_http_proxy404.define_singleton_method(:request) do |_req|
-  FakeResp.new("404", "{\"error\":\"proxy endpoint not found\"}")
-end
-generic404.define_singleton_method(:http_for) { |_uri| fake_http_proxy404 }
-
-raised = nil
-begin
-  generic404.stop
-rescue AgentSandbox::SandboxNotFound => e
-  raised = e
-end
-assert.("generic 404 (proxy error) surfaces as SandboxNotFound", raised.is_a?(AgentSandbox::SandboxNotFound),
-        raised&.inspect)
-assert.("generic 404 does NOT clear @sandbox_id (caller can retry/escalate)",
-        generic404.instance_variable_get(:@sandbox_id) == "sb-still-running",
-        "sandbox_id=#{generic404.instance_variable_get(:@sandbox_id).inspect}")
-
-# Various real "sandbox not found" body phrasings should be recognised.
-puts "[E2B#stop: recognises real sandbox-not-found markers]"
-[
-  "{\"message\":\"sandbox not found\"}",
-  "{\"message\":\"Sandbox does not exist\"}",
-  "{\"message\":\"sandbox was not found\",\"code\":404}",
-  "{\"message\":\"No such sandbox\"}"
-].each do |body|
+# Helper to build a fresh E2B backend wired to a fake HTTP that returns a
+# single configured response — used by the structured-validation tests.
+def stub_e2b_backend(sandbox_id:, response_body:, response_code: "404")
   b = AgentSandbox::Backends::E2B.allocate
   b.instance_variable_set(:@api_key, "test")
-  b.instance_variable_set(:@sandbox_id, "sb-x")
+  b.instance_variable_set(:@sandbox_id, sandbox_id)
   b.instance_variable_set(:@open_timeout, 1)
   b.instance_variable_set(:@read_timeout, 1)
   b.instance_variable_set(:@max_retries, 0)
   b.define_singleton_method(:backoff_for) { |_| 0 }
   fake = Object.new
-  fake.define_singleton_method(:request) { |_| FakeResp.new("404", body) }
+  fake.define_singleton_method(:request) { |_| FakeResp.new(response_code, response_body) }
   b.define_singleton_method(:http_for) { |_| fake }
+  b
+end
+
+# --- structured validation of sandbox-not-found responses -----------------
+# Codex finding: a bare 404 from path drift, CDN/proxy misrouting, or a
+# degraded control-plane endpoint must not be treated as proof of deletion.
+# Only a JSON body whose provider-structured fields positively identify the
+# error as "this sandbox is gone" clears @sandbox_id. Substring matches
+# against arbitrary body text are rejected — an HTML proxy page or CDN
+# error that happens to contain "sandbox" or "not found" must surface
+# SandboxNotFound to the caller with the sandbox handle retained.
+
+puts "[E2B#stop: non-JSON 404 body (HTML proxy page) keeps @sandbox_id set]"
+b = stub_e2b_backend(
+  sandbox_id: "sb-still-running",
+  response_body: "<html><body>404 sandbox not found - proxy error</body></html>"
+)
+raised = nil
+begin; b.stop; rescue AgentSandbox::SandboxNotFound => e; raised = e; end
+assert.("non-JSON 404 surfaces SandboxNotFound", raised.is_a?(AgentSandbox::SandboxNotFound), raised&.inspect)
+assert.("non-JSON 404 does NOT clear @sandbox_id (handle retained)",
+        b.instance_variable_get(:@sandbox_id) == "sb-still-running",
+        b.instance_variable_get(:@sandbox_id).inspect)
+
+puts "[E2B#stop: JSON 404 without sandbox-specific fields keeps @sandbox_id set]"
+b = stub_e2b_backend(
+  sandbox_id: "sb-still-running",
+  response_body: "{\"error\":\"proxy endpoint not found\"}"
+)
+raised = nil
+begin; b.stop; rescue AgentSandbox::SandboxNotFound => e; raised = e; end
+assert.("proxy-error JSON surfaces SandboxNotFound", raised.is_a?(AgentSandbox::SandboxNotFound), raised&.inspect)
+assert.("proxy-error JSON does NOT clear @sandbox_id",
+        b.instance_variable_get(:@sandbox_id) == "sb-still-running")
+
+puts "[E2B#stop: JSON 404 with unrelated 'sandbox' mention keeps @sandbox_id set]"
+# Adversarial: an intermediate error page that happens to mention "sandbox"
+# in a non-sandbox-not-found context (e.g. rate-limit page referencing
+# sandboxes) must NOT clear state.
+b = stub_e2b_backend(
+  sandbox_id: "sb-still-running",
+  response_body: "{\"error\":\"rate limit exceeded\",\"detail\":\"too many sandbox creations\"}"
+)
+raised = nil
+begin; b.stop; rescue AgentSandbox::SandboxNotFound => e; raised = e; end
+assert.("unrelated 'sandbox' mention surfaces SandboxNotFound",
+        raised.is_a?(AgentSandbox::SandboxNotFound), raised&.inspect)
+assert.("unrelated 'sandbox' mention does NOT clear @sandbox_id",
+        b.instance_variable_get(:@sandbox_id) == "sb-still-running")
+
+puts "[E2B#stop: structured sandbox_not_found code clears @sandbox_id]"
+[
+  "{\"code\":\"sandbox_not_found\",\"message\":\"sandbox sb-x not found\"}",
+  "{\"type\":\"sandbox_not_found\",\"message\":\"gone\"}",
+  "{\"message\":\"sandbox not found\"}",
+  "{\"message\":\"Sandbox does not exist\"}",
+  "{\"message\":\"sandbox was not found\",\"code\":404}",
+  "{\"error\":\"no such sandbox\"}"
+].each do |body|
+  b = stub_e2b_backend(sandbox_id: "sb-x", response_body: body)
   raised = nil
-  begin
-    b.stop
-  rescue => e
-    raised = e
-  end
-  assert.("real not-found body (#{body[0, 40]}…) clears state",
+  begin; b.stop; rescue => e; raised = e; end
+  assert.("structured not-found (#{body[0, 40]}…) clears state",
           raised.nil? && b.instance_variable_get(:@sandbox_id).nil?,
           "raised=#{raised.inspect} sbx=#{b.instance_variable_get(:@sandbox_id).inspect}")
 end
+
+puts "[SandboxNotFound carries raw status + body for structured validation]"
+snf = AgentSandbox::SandboxNotFound.new("probe: 404 xxx", status: 404, body: "{\"code\":\"x\"}")
+assert.("SandboxNotFound#status == 404", snf.status == 404)
+assert.("SandboxNotFound#body round-trips raw JSON", snf.body == "{\"code\":\"x\"}")
 
 # --- wrapper-level E2B retry-stop recovery ---
 # Codex finding: after a failed E2B stop, the public Sandbox API must let the

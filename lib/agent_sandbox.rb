@@ -7,7 +7,18 @@ module AgentSandbox
   class Error < StandardError; end
   class UnsupportedOperation < Error; end
   class AuthError < Error; end
-  class SandboxNotFound < Error; end
+  # SandboxNotFound carries the raw HTTP status + body so callers (e.g.
+  # E2B#stop deciding whether a 404 really means "sandbox gone") can
+  # inspect the structured provider response instead of string-matching
+  # Exception#message.
+  class SandboxNotFound < Error
+    attr_reader :status, :body
+    def initialize(message = nil, status: nil, body: nil)
+      @status = status
+      @body = body
+      super(message)
+    end
+  end
   class TimeoutError < Error; end
   class ConnectError < Error; end
   class ServerError < Error; end
@@ -31,23 +42,6 @@ module AgentSandbox
     end
   end
 
-  # Raised when BOTH the user's block AND sandbox cleanup fail. The `cause`
-  # slot carries the original block error (so its own cause chain survives
-  # untouched, and default exception reporting — full_message, APMs, log
-  # handlers that traverse `cause` — surfaces the whole story). The cleanup
-  # failure is exposed via #cleanup_error for callers that need it
-  # individually.
-  class CleanupError < Error
-    attr_reader :block_error, :cleanup_error
-    def initialize(block_error, cleanup_error)
-      @block_error = block_error
-      @cleanup_error = cleanup_error
-      super(
-        "sandbox block raised #{block_error.class}: #{block_error.message}; " \
-        "then cleanup raised #{cleanup_error.class}: #{cleanup_error.message}"
-      )
-    end
-  end
 
   BACKENDS = {
     docker: Backends::Docker,

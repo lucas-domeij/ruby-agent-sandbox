@@ -65,12 +65,15 @@ module AgentSandbox
     end
 
     # Auto-start, yield, auto-stop. Cleanup runs on normal return, on
-    # exceptions, and on non-local exits (return/break/throw). If both the
-    # block and cleanup raise, surface a CleanupError whose `cause` is the
-    # original block error — so the block error's own cause chain rides
-    # along (full_message / APMs / default log handlers traverse `cause`
-    # and will print both failures) — and whose #cleanup_error returns the
-    # cleanup failure for callers that want to branch on it.
+    # exceptions, and on non-local exits (return/break/throw).
+    #
+    # Dual-failure strategy: preserve the original block exception's class
+    # and ivars at the top (so `rescue ExecError` / `rescue HttpError`
+    # keeps working) and splice the cleanup failure into the cause chain
+    # ABOVE the block error's pre-existing cause — so full_message / APMs
+    # / anything that traverses `cause` sees both failures AND the block
+    # error's own cause chain survives untouched. The cleanup failure is
+    # also exposed via #cleanup_error for callers that want it directly.
     def open
       start
       block_error = nil
@@ -84,7 +87,10 @@ module AgentSandbox
           stop
         rescue => cleanup_error
           if block_error
-            raise CleanupError.new(block_error, cleanup_error), cause: block_error
+            copy = block_error.exception(block_error.message)
+            copy.set_backtrace(block_error.backtrace) if block_error.backtrace
+            copy.define_singleton_method(:cleanup_error) { cleanup_error }
+            raise copy, cause: chain_cleanup(cleanup_error, block_error.cause)
           else
             raise
           end
@@ -94,6 +100,19 @@ module AgentSandbox
     alias_method :with, :open
 
     private
+
+    # Stitch cleanup into the block error's existing cause chain without
+    # clobbering either. Result: raised → cleanup → block_error.cause → …
+    def chain_cleanup(cleanup_error, original_cause)
+      return cleanup_error unless original_cause
+      clone = cleanup_error.exception(cleanup_error.message)
+      clone.set_backtrace(cleanup_error.backtrace) if cleanup_error.backtrace
+      begin
+        raise clone, cause: original_cause
+      rescue => chained
+        chained
+      end
+    end
 
     def backend_supports?(capability)
       return @backend.supports?(capability) if @backend.respond_to?(:supports?)
