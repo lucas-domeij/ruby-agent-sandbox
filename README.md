@@ -252,13 +252,12 @@ Pass `hardened: false` to turn it all off, or override individual flags.
 
 ## Status
 
-Working prototype. Kicked the tires with a real LLM driving a real
-sandbox — it works. That said:
+Released as [v0.1.0 on RubyGems](https://rubygems.org/gems/agent_sandbox).
+Driven by a real LLM against a real sandbox — it works. Caveats:
 
 - Only Docker + E2B wired up so far
 - E2B `spawn` needs tagged Connect-RPC before it'll work
-- No CI, no Rubygems release yet
-- API may still shift
+- API may still shift before 1.0
 
 ## Prior art
 
