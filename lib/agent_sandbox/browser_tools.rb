@@ -2,6 +2,7 @@ require "ruby_llm"
 require "json"
 require "shellwords"
 require "tempfile"
+require "base64"
 
 module AgentSandbox
   # RubyLLM tool adapters for Vercel's `agent-browser` CLI running inside
@@ -183,7 +184,7 @@ module AgentSandbox
 
       def execute(milliseconds: nil, text: nil)
         if text
-          run_ab(["wait", "text", text, "--json"])
+          run_ab(["wait", "--text", text, "--json"])
         elsif milliseconds
           run_ab(["wait", milliseconds.to_s, "--json"])
         else
@@ -279,18 +280,24 @@ module AgentSandbox
       end
 
       def execute(url:, focus: nil)
-        sandbox_path = "/tmp/agent-img-#{Time.now.to_f.to_s.tr('.', '')}"
-        result = @sandbox.exec(
-          "curl -fsSL -o #{Shellwords.escape(sandbox_path)} " \
-            "-w '%{content_type}' #{Shellwords.escape(url)}"
-        )
-        unless result.success?
-          return { error: "download failed", status: result.status,
-                   stderr: result.stderr[0, 500] }
+        # Fetch through the current page's fetch() so cookies + origin
+        # headers from the live session are sent (image URLs on logged-in
+        # pages commonly require them). Fall back to a direct download if
+        # there's no page context or the in-page fetch refuses (CORS etc).
+        bytes, content_type, session_error = fetch_via_session(url)
+        if bytes.nil?
+          bytes, content_type, curl_error = fetch_via_curl(url)
+          if bytes.nil?
+            return { error: "download failed", url: url,
+                     session_error: session_error, curl_error: curl_error }
+          end
         end
-        content_type = result.stdout.strip
-        bytes = @sandbox.read_file(sandbox_path)
-        @sandbox.exec("rm -f #{Shellwords.escape(sandbox_path)}")
+
+        unless content_type.to_s.start_with?("image/")
+          return { error: "not an image", url: url, content_type: content_type,
+                   bytes: bytes.bytesize,
+                   hint: "response wasn't image/* — often a redirect to an HTML login/CAPTCHA page. Try opening the URL in the browser first to authenticate, then retry." }
+        end
 
         description = VisionSupport.read_image_bytes(
           bytes, extension: content_type_to_ext(content_type) || "img",
@@ -301,6 +308,49 @@ module AgentSandbox
       end
 
       private
+
+      def fetch_via_session(url)
+        js = <<~JS
+          (async () => {
+            try {
+              const r = await fetch(#{url.to_json}, { credentials: "include" });
+              if (!r.ok) return { ok: false, error: "HTTP " + r.status };
+              const ct = r.headers.get("content-type") || "";
+              const buf = await r.arrayBuffer();
+              const u8 = new Uint8Array(buf);
+              let bin = "";
+              const chunk = 0x8000;
+              for (let i = 0; i < u8.length; i += chunk) {
+                bin += String.fromCharCode.apply(null, u8.subarray(i, i + chunk));
+              }
+              return { ok: true, contentType: ct, dataBase64: btoa(bin) };
+            } catch (e) {
+              return { ok: false, error: String(e && e.message || e) };
+            }
+          })()
+        JS
+        data = run_ab(["eval", js, "--json"])
+        return [nil, nil, data[:error]] if data.is_a?(Hash) && data[:error]
+        result = data.is_a?(Hash) ? (data["result"] || data[:result]) : nil
+        return [nil, nil, "eval returned #{data.inspect[0, 200]}"] unless result.is_a?(Hash)
+        return [nil, nil, result["error"]] unless result["ok"]
+        [Base64.decode64(result["dataBase64"].to_s), result["contentType"].to_s, nil]
+      end
+
+      def fetch_via_curl(url)
+        sandbox_path = "/tmp/agent-img-#{Time.now.to_f.to_s.tr('.', '')}"
+        result = @sandbox.exec(
+          "curl -fsSL -o #{Shellwords.escape(sandbox_path)} " \
+            "-w '%{content_type}' #{Shellwords.escape(url)}"
+        )
+        unless result.success?
+          return [nil, nil, "status=#{result.status} stderr=#{result.stderr[0, 200]}"]
+        end
+        content_type = result.stdout.strip
+        bytes = @sandbox.read_file(sandbox_path)
+        @sandbox.exec("rm -f #{Shellwords.escape(sandbox_path)}")
+        [bytes, content_type, nil]
+      end
 
       def content_type_to_ext(ct)
         case ct.to_s
