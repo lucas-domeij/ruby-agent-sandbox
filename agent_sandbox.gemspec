@@ -17,7 +17,8 @@ Gem::Specification.new do |spec|
     "rubygems_mfa_required" => "true"
   }
 
-  spec.files = Dir["lib/**/*.rb", "README.md", "LICENSE*"]
+  spec.files = Dir["lib/**/*.rb", "README.md", "CHANGELOG.md", "LICENSE*"]
+  spec.extra_rdoc_files = ["README.md", "CHANGELOG.md"]
   spec.require_paths = ["lib"]
 
   # `ruby_llm` is an optional integration — only needed if you call

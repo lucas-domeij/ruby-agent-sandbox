@@ -6,7 +6,8 @@ UNIT_TESTS = FileList[
   "test/docker_port_parse_test.rb",
   "test/docker_lifecycle_test.rb",
   "test/e2b_frames_test.rb",
-  "test/e2b_error_mapping_test.rb"
+  "test/e2b_error_mapping_test.rb",
+  "test/browser_tools_test.rb"
 ]
 
 desc "Run unit tests (no Docker / no network)"
