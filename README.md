@@ -146,6 +146,34 @@ docker build -f docker/browser.Dockerfile -t agent-sandbox-browser .
 Chrome needs `hardened: false` (it writes under `/root`) and `memory: "2g"`.
 Those two args in the sandbox constructor above are load-bearing.
 
+### Running on E2B
+
+The same browser tools work against the `:e2b` backend — only the template
+has to exist in your E2B account. `e2b/browser/e2b.Dockerfile` is the
+reference image:
+
+```sh
+cd e2b/browser
+e2b auth login           # one-time
+e2b template create agent-sandbox-browser --memory-mb 2048 --cpu-count 2
+```
+
+Then flip the backend:
+
+```ruby
+sandbox = AgentSandbox.new(backend: :e2b, template: "agent-sandbox-browser")
+
+sandbox.open do |sb|
+  RubyLLM.chat(model: "gpt-5")
+    .with_tools(*AgentSandbox.browser_tools(sb))
+    .ask("What is the title of example.com?")
+end
+```
+
+E2B runs the sandbox as user `user` (not root), so the Docker-specific
+`hardened: false` / `memory: "2g"` knobs don't apply — memory is set at
+template-build time via `--memory-mb`.
+
 ## Sandbox lifecycle
 
 `exec` / `write_file` / `read_file` all auto-start the sandbox, so the only
