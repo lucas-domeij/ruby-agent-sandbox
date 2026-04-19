@@ -21,8 +21,9 @@ Gem::Specification.new do |spec|
   spec.require_paths = ["lib"]
 
   # `ruby_llm` is an optional integration — only needed if you call
-  # `AgentSandbox.ruby_llm_tools(sandbox)`. Kept out of runtime deps so the
-  # gem stays light; add it to your own Gemfile if you want the tool adapters.
+  # `AgentSandbox.ruby_llm_tools(sandbox)` or `AgentSandbox.browser_tools(sandbox)`.
+  # Kept out of runtime deps so the gem stays light; add it to your own
+  # Gemfile if you want the tool adapters.
   spec.add_development_dependency "ruby_llm", ">= 1.0"
   spec.add_development_dependency "rake",     ">= 13.0"
 end

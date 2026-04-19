@@ -87,6 +87,65 @@ sandbox.stop
 The LLM gets four tools: `exec`, `write_file`, `read_file`, `port_url`.
 It decides when to call them.
 
+## Browser tools
+
+For agents that need to drive a real website — scrape, fill forms, click
+through flows — the gem also ships adapters around [Vercel's
+`agent-browser`](https://github.com/vercel-labs/agent-browser) CLI:
+
+```ruby
+sandbox = AgentSandbox.new(
+  backend: :docker, image: "agent-sandbox-browser",
+  hardened: false, memory: "2g"
+)
+
+sandbox.open do |sb|
+  RubyLLM.chat(model: "gpt-5")
+    .with_tools(*AgentSandbox.browser_tools(sb))
+    .ask("Hitta Lidls extrapriser denna vecka")
+end
+```
+
+The LLM gets 11 tools backed by a real Chromium running in the sandbox:
+
+| Tool | What it does |
+| --- | --- |
+| `open` | Navigate to a URL |
+| `snapshot` | Accessibility-tree snapshot with `@e1/@e2/…` refs |
+| `click` / `fill` / `get_text` | Drive elements by ref |
+| `wait` | Wait for ms or text |
+| `back` / `reload` | Navigation |
+| `eval` | Run arbitrary JS in the page |
+| `screenshot` | PNG of the viewport → vision-model description |
+| `read_image` | Download any image URL → vision-model description |
+
+`screenshot` and `read_image` make a secondary multimodal call (default
+`gpt-5`, override with `browser_tools(sb, vision_model: "…")` or
+`AGENT_SANDBOX_VISION_MODEL`) so the caller's tool loop only ever sees text.
+
+### When to use which
+
+- Product listings, search results, forms → `snapshot` + `click`/`get_text`.
+  Fast, cheap, exact.
+- Canvas-rendered flipbooks / brochure viewers → `eval` to discover the
+  underlying `<img>` URLs, then `read_image` on each page. Much higher
+  resolution than a viewport `screenshot`, and skips browser chrome.
+- JS-heavy SPAs where elements don't show up in `snapshot` → `eval` to poke
+  at `window.__NEXT_DATA__`, Redux state, or fetch intercepts.
+- Truly canvas-only UIs (maps, charts) → `screenshot` with a `focus:` hint.
+
+### The image
+
+`docker/browser.Dockerfile` layers `agent-browser` + distro chromium on top
+of `debian:bookworm-slim`. Multi-arch (amd64/arm64). Build it once:
+
+```sh
+docker build -f docker/browser.Dockerfile -t agent-sandbox-browser .
+```
+
+Chrome needs `hardened: false` (it writes under `/root`) and `memory: "2g"`.
+Those two args in the sandbox constructor above are load-bearing.
+
 ## Sandbox lifecycle
 
 `exec` / `write_file` / `read_file` all auto-start the sandbox, so the only

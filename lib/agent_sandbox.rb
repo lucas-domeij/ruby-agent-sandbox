@@ -57,4 +57,16 @@ module AgentSandbox
     require "agent_sandbox/ruby_llm_tools"
     RubyLLMTools.build(sandbox)
   end
+
+  # Browser control tools (navigate / click / fill / snapshot / …) backed
+  # by Vercel's agent-browser CLI. Requires the sandbox to use a browser-
+  # capable image — see docker/browser.Dockerfile.
+  #
+  # Pass `vision_model:` to override the multimodal model used by
+  # `screenshot` / `read_image`. Default: ENV["AGENT_SANDBOX_VISION_MODEL"]
+  # or "gpt-5".
+  def self.browser_tools(sandbox, vision_model: nil)
+    require "agent_sandbox/browser_tools"
+    BrowserTools.build(sandbox, vision_model: vision_model)
+  end
 end
