@@ -1,5 +1,8 @@
 # agent_sandbox
 
+[![Gem Version](https://img.shields.io/gem/v/agent_sandbox)](https://rubygems.org/gems/agent_sandbox)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+
 Give an AI agent a disposable computer.
 
 A Ruby gem that lets you hand an LLM a shell, a filesystem, and a network
@@ -20,13 +23,15 @@ whatever — and when they're done you just drop the sandbox.
 
 ## Install
 
-```ruby
-# Gemfile
-gem "agent_sandbox", git: "https://github.com/lucas-domeij/ruby-agent-sandbox"
+```sh
+bundle add agent_sandbox
+# or
+gem install agent_sandbox
 ```
 
 Docker backend needs the Docker daemon running. E2B needs an API key from
-[e2b.dev](https://e2b.dev).
+[e2b.dev](https://e2b.dev). The RubyLLM and browser tool adapters require
+`ruby_llm` — add it to your Gemfile if you want them.
 
 ## Quick start — Docker
 
