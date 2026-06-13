@@ -313,4 +313,20 @@ assert.(
   raised.inspect
 )
 
+puts "[exec: signal-killed process maps to 128+signum, not nil]"
+SIGNAL_STATUS = Struct.new(:exitstatus, :termsig)
+backend = fresh_backend
+STUB_CAPTURE3[:resp] = ["", "Killed\n", SIGNAL_STATUS.new(nil, 9)]
+r = backend.exec("oom-me")
+assert.("SIGKILL maps to 137", r.status == 137, r.status.inspect)
+assert.("success? false on signal exit", r.success? == false)
+
+STUB_CAPTURE3[:resp] = ["", "", SIGNAL_STATUS.new(nil, nil)]
+r = backend.exec("weird-exit")
+assert.("nil exitstatus + nil termsig falls back to 1", r.status == 1, r.status.inspect)
+
+STUB_CAPTURE3[:resp] = ["ok\n", "", SIGNAL_STATUS.new(0, nil)]
+r = backend.exec("true")
+assert.("normal exit still 0", r.status == 0 && r.success?, r.status.inspect)
+
 TestHelper.done(fails, label: "docker lifecycle")

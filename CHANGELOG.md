@@ -39,7 +39,9 @@ Initial release.
   - `e2b/browser/e2b.Dockerfile` — same stack built as an E2B template.
 - **Error hierarchy**: `AgentSandbox::Error`, `AuthError`, `TimeoutError`,
   `ConnectError`, `ServerError`, `HttpError`, `SandboxNotFound`,
-  `UnsupportedOperation`, `CleanupError`.
+  `UnsupportedOperation`. When cleanup fails inside `open { … }`, the
+  block's original error is re-raised with the cleanup failure available
+  via `#cleanup_error` and spliced into its `cause` chain.
 
 [Unreleased]: https://github.com/lucas-domeij/ruby-agent-sandbox/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/lucas-domeij/ruby-agent-sandbox/releases/tag/v0.1.0

@@ -87,7 +87,7 @@ module AgentSandbox
 
       def exec(command)
         stdout, stderr, status = Open3.capture3("docker", "exec", @name, "sh", "-lc", command)
-        ExecResult.new(stdout: stdout, stderr: stderr, status: status.exitstatus)
+        ExecResult.new(stdout: stdout, stderr: stderr, status: exit_code(status))
       end
 
       def spawn(command)
@@ -135,6 +135,12 @@ module AgentSandbox
 
       def pick(override, default)
         override.nil? ? default : override
+      end
+
+      # exitstatus is nil when the process was killed by a signal. Map to
+      # 128+signum (shell convention) so ExecResult#success? never sees nil.
+      def exit_code(status)
+        status.exitstatus || (status.termsig ? 128 + status.termsig : 1)
       end
 
       def resolve_port_map
